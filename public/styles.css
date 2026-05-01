@@ -53,11 +53,8 @@ input {
 }
 
 .event-tabs-wrap {
-  position: sticky;
-  top: 0;
-  z-index: 20;
+  margin-top: 12px;
   background: rgba(15, 17, 22, 0.88);
-  backdrop-filter: blur(10px);
   border: 1px solid var(--line);
   border-radius: 10px;
   padding: 10px;
