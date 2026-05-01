@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Rose247</title>
+    <link rel="stylesheet" href="./styles.css">
+  </head>
+  <body>
+    <div id="login-layer" class="login-layer">
+      <form id="login-form" class="login-card">
+        <h1>Rose247 Admin Panel</h1>
+        <p>LOGIN</p>
+        <label for="login-user">Username</label>
+        <input id="login-user" name="username" type="text" autocomplete="username" required>
+        <label for="login-pass">Password</label>
+        <input id="login-pass" name="password" type="password" autocomplete="current-password" required>
+        <button type="submit">Login</button>
+        <p id="login-error" class="login-error" aria-live="polite"></p>
+      </form>
+    </div>
+
+    <main class="shell">
+      <section class="board-title-wrap">
+        <h1 id="board-title" class="board-title">Rose247</h1>
+      </section>
+
+      <section class="event-tabs-wrap">
+        <div id="event-tabs" class="event-tabs" aria-label="Events"></div>
+      </section>
+
+      <section id="content" class="content">
+        <div class="empty-state">
+          <h2>Waiting for events</h2>
+          <p>Events are loaded from Google Sheets.</p>
+        </div>
+      </section>
+
+      <section class="status-bar" aria-live="polite">
+        <span id="status">Ready</span>
+        <span id="meta"></span>
+      </section>
+
+    </main>
+
+    <script src="./app.js?v=20260430f"></script>
+  </body>
+</html>
