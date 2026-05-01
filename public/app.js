@@ -404,7 +404,6 @@ function renderPayload(payload) {
   const fancyRows = rows.filter((row) => row.marketType === "FANCY");
 
   const fragment = document.createDocumentFragment();
-  fragment.append(createSummary(payload, rows.length));
 
   if (bookmakerRows.length) fragment.append(createMarketSection("Bookmaker", ["Bookmaker", "Back", "Lay"], bookmakerRows, false));
   if (fancyRows.length) fragment.append(createMarketSection("Fancy", ["Bookmaker", "No", "Yes"], fancyRows, true));
@@ -415,6 +414,7 @@ function renderPayload(payload) {
     fragment.append(empty);
   }
 
+  fragment.append(createSummary(payload, rows.length));
   fragment.append(createRawPanel(payload.data));
   content.replaceChildren(fragment);
   hasRenderedData = true;
