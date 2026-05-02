@@ -1,2 +1,3 @@
 /api/event-fancy /.netlify/functions/event-fancy 200
 /api/sheet-config /.netlify/functions/sheet-config 200
+/api/live-score /.netlify/functions/live-score 200

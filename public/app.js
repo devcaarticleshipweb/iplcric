@@ -12,6 +12,7 @@ const loginError = document.querySelector("#login-error");
 const REFRESH_INTERVAL_MS = 1000;
 const SESSION_KEY = "fair91.auth";
 const SELECTED_EVENT_KEY = "fair91.selectedEventId";
+const ROW_STATS_KEY = "fair91.rowStats";
 
 let refreshTimer = null;
 let isFetching = false;
@@ -22,10 +23,32 @@ let loginRows = [];
 let eventRows = [];
 let rowStats = new Map();
 let lastRowsByKey = new Map();
+let liveScoreState = {
+  data: null,
+  error: "",
+  fetchedAt: ""
+};
 
 function setStatus(message, meta = "") {
   statusText.textContent = message;
   metaText.textContent = meta;
+}
+
+function makeStatsKey(eventId, rowKey) {
+  return `${eventId || "unknown"}::${rowKey}`;
+}
+
+function loadRowStats() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(ROW_STATS_KEY) || "{}");
+    return new Map(Object.entries(saved));
+  } catch {
+    return new Map();
+  }
+}
+
+function saveRowStats() {
+  localStorage.setItem(ROW_STATS_KEY, JSON.stringify(Object.fromEntries(rowStats)));
 }
 
 function simpleValue(value) {
@@ -134,7 +157,8 @@ function normalizeEvents(rows) {
   const events = normalizeTabularRows(rows)
     .map((row) => ({
       id: getFieldValue(row, ["event_id", "eventid", "id", "event"]),
-      name: getFieldValue(row, ["event_name", "eventname", "name", "title", "match"])
+      name: getFieldValue(row, ["event_name", "eventname", "name", "title", "match"]),
+      scoreKey: getFieldValue(row, ["score_key", "scorekey", "live_score_key", "livescorekey", "key", "score"])
     }))
     .filter((event) => event.id);
 
@@ -208,7 +232,6 @@ function renderTabs() {
       selectedEventId = event.id;
       selectedEventName = event.name;
       localStorage.setItem(SELECTED_EVENT_KEY, selectedEventId);
-      rowStats = new Map();
       lastRowsByKey = new Map();
       hasRenderedData = false;
       renderTabs();
@@ -277,7 +300,8 @@ function buildOddsRows(value) {
 }
 
 function updateSeenRange(key, backPrice, layPrice) {
-  const stats = rowStats.get(key) || { min: null, max: null };
+  const storageKey = makeStatsKey(selectedEventId, key);
+  const stats = rowStats.get(storageKey) || { min: null, max: null };
   const nums = [toNum(backPrice), toNum(layPrice)].filter((value) => value !== null);
   if (nums.length === 0) return stats;
 
@@ -285,7 +309,8 @@ function updateSeenRange(key, backPrice, layPrice) {
   const nowMax = Math.max(...nums);
   stats.min = stats.min === null ? nowMin : Math.min(stats.min, nowMin);
   stats.max = stats.max === null ? nowMax : Math.max(stats.max, nowMax);
-  rowStats.set(key, stats);
+  rowStats.set(storageKey, stats);
+  saveRowStats();
   return stats;
 }
 
@@ -298,6 +323,259 @@ function createSummary(payload, total) {
     <div class="summary-item"><span>Updated</span><strong>${new Date(payload.fetchedAt).toLocaleTimeString()}</strong></div>
   `;
   return node;
+}
+
+async function fetchLiveScore() {
+  try {
+    const selected = eventRows.find((event) => event.id === selectedEventId);
+    const scoreKey = selected?.scoreKey || "";
+
+    if (!scoreKey) {
+      throw new Error("Live score key missing in Events sheet.");
+    }
+
+    const response = await fetch(`/api/live-score?key=${encodeURIComponent(scoreKey)}`);
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.detail || payload.error || "Live score request failed.");
+
+    liveScoreState = {
+      data: payload.data,
+      error: "",
+      fetchedAt: payload.fetchedAt
+    };
+  } catch (error) {
+    liveScoreState = {
+      data: null,
+      error: error.message,
+      fetchedAt: new Date().toISOString()
+    };
+  }
+}
+
+const BALL_STATUS_MAP = {
+  b: "Ball",
+  o: "Over",
+  wd: "Wide",
+  ba: "Ball in Air",
+  f: "Fast Bowler",
+  s: "Spin Bowler",
+  "^1": "Bowled",
+  "^2": "Caught Out",
+  "^3": "Caught and Bowled",
+  w: "Wicket",
+  nb: "No Ball",
+  lb: "Leg Bye",
+  by: "Bye",
+  four: "Four",
+  six: "Six"
+};
+
+function flattenScoreObjects(value, out = [], depth = 0) {
+  const parsed = parseMaybeJson(value, value);
+  if (depth > 5) return out;
+
+  if (Array.isArray(parsed)) {
+    parsed.forEach((item) => flattenScoreObjects(item, out, depth + 1));
+    return out;
+  }
+
+  if (!isPlainObject(parsed)) return out;
+  out.push(parsed);
+
+  Object.values(parsed).forEach((item) => {
+    if (isPlainObject(item) || Array.isArray(item) || (typeof item === "string" && /^[\[{]/.test(item.trim()))) {
+      flattenScoreObjects(item, out, depth + 1);
+    }
+  });
+  return out;
+}
+
+function firstScoreValue(objects, candidates) {
+  const normalized = candidates.map((key) => key.toLowerCase().replace(/[^a-z0-9^]/g, ""));
+
+  for (const obj of objects) {
+    for (const [key, value] of Object.entries(obj)) {
+      if (value === null || value === undefined || value === "") continue;
+      const norm = key.toLowerCase().replace(/[^a-z0-9^]/g, "");
+      if (normalized.includes(norm)) return value;
+    }
+  }
+  return "";
+}
+
+function readScoreModel(data) {
+  const objects = flattenScoreObjects(data);
+  const selected = eventRows.find((event) => event.id === selectedEventId);
+  const teams = splitEventTeams(selectedEventName || selected?.name || "");
+  const scoreParts = parseScoreJ(firstScoreValue(objects, ["j", "score_over", "scoreOver", "innings"]));
+  const statusCode = String(firstScoreValue(objects, ["b", "ball_status", "ballStatus", "status_code", "statusCode"]) || "").trim();
+  const statusText = BALL_STATUS_MAP[statusCode.toLowerCase()] || statusCode || "Live";
+
+  return {
+    title: firstScoreValue(objects, ["title", "match_title", "matchTitle", "match", "name"]) || selectedEventName || "Live Match",
+    battingTeam: firstScoreValue(objects, ["batting_team", "battingTeam", "team", "batteam", "btm", "t1"]) || teams[0],
+    bowlingTeam: firstScoreValue(objects, ["bowling_team", "bowlingTeam", "bowlteam", "t2"]) || teams[1],
+    score: firstScoreValue(objects, ["score", "runs", "inning_score", "inningsScore", "scr"]) || scoreParts.runs,
+    wickets: firstScoreValue(objects, ["wickets", "wkts", "wicket", "w"]) || scoreParts.wickets,
+    overs: scoreParts.overs || firstScoreValue(objects, ["overs", "over", "ov"]),
+    crr: firstScoreValue(objects, ["crr", "current_run_rate", "currentRunRate", "rr", "runrate"]) || scoreParts.crr,
+    next: firstScoreValue(objects, ["next_to_bowl", "nextToBowl", "opt_to_bowl", "optToBowl", "message", "commentary"]) || "",
+    striker: firstScoreValue(objects, ["striker", "batsman1", "batsman", "bat1", "p1"]) || "",
+    strikerRuns: firstScoreValue(objects, ["striker_runs", "batsman1_runs", "bat1_runs", "r1"]) || "",
+    strikerBalls: firstScoreValue(objects, ["striker_balls", "batsman1_balls", "bat1_balls", "b1"]) || "",
+    nonStriker: firstScoreValue(objects, ["non_striker", "nonStriker", "batsman2", "bat2", "p2"]) || "",
+    nonStrikerRuns: firstScoreValue(objects, ["non_striker_runs", "batsman2_runs", "bat2_runs", "r2"]) || "",
+    nonStrikerBalls: firstScoreValue(objects, ["non_striker_balls", "batsman2_balls", "bat2_balls", "b2"]) || "",
+    bowler: firstScoreValue(objects, ["bowler", "current_bowler", "currentBowler", "blw"]) || "",
+    bowlerFigures: firstScoreValue(objects, ["bowler_figures", "bowlerFigures", "figures", "bowl_fig"]) || "",
+    statusCode,
+    statusText,
+    overBalls: firstScoreValue(objects, ["A", "balls", "this_over", "thisOver", "last_over", "lastOver", "recentBalls"]) || "",
+    projected: firstScoreValue(objects, ["projected", "projected_score", "projectedScore", "projection"]) || ""
+  };
+}
+
+function splitEventTeams(name) {
+  const clean = String(name || "").replace(/\s+/g, " ").trim();
+  const parts = clean.split(/\s+v\/?s\.?\s+|\s+vs\.?\s+|\s+v\s+/i).map((part) => part.trim()).filter(Boolean);
+  return [parts[0] || "", parts[1] || ""];
+}
+
+function parseScoreJ(value) {
+  const text = String(value || "").trim();
+  const match = text.match(/(\d+)\s*\/\s*(\d+)\s*\(?\s*([0-9]+(?:\.[0-9]+)?)/);
+
+  if (!match) {
+    return { runs: "", wickets: "", overs: "", crr: "" };
+  }
+
+  const runs = Number(match[1]);
+  const wickets = match[2];
+  const overs = match[3] || "";
+  const balls = oversToBalls(overs);
+  const crr = balls > 0 ? ((runs * 6) / balls).toFixed(2) : "";
+
+  return {
+    runs: String(runs),
+    wickets,
+    overs,
+    crr
+  };
+}
+
+function oversToBalls(overs) {
+  const [overPart, ballPart = "0"] = String(overs || "").split(".");
+  const completedOvers = Number(overPart);
+  const balls = Number(ballPart);
+
+  if (!Number.isFinite(completedOvers) || !Number.isFinite(balls)) return 0;
+  return completedOvers * 6 + balls;
+}
+
+function formatScore(score, wickets) {
+  if (!score && !wickets) return "-";
+  if (score && String(score).includes("-")) return String(score);
+  return `${simpleValue(score)}-${simpleValue(wickets)}`;
+}
+
+function formatPlayerLine(name, runs, balls) {
+  if (!name) return "-";
+  const score = runs || balls ? ` ${simpleValue(runs)} (${simpleValue(balls)})` : "";
+  return `${name}${score}`;
+}
+
+function createBallPills(value) {
+  const wrap = document.createElement("div");
+  wrap.className = "score-balls";
+  const raw = Array.isArray(value) ? value : String(value || "").split(/[\s,.|/]+/);
+  const balls = raw.map((ball) => String(ball).trim()).filter(Boolean).slice(-12);
+
+  if (balls.length === 0) {
+    const pill = document.createElement("span");
+    pill.className = "ball-pill muted";
+    pill.textContent = "-";
+    wrap.append(pill);
+    return wrap;
+  }
+
+  balls.forEach((ball) => {
+    const pill = document.createElement("span");
+    const normalized = ball.toLowerCase();
+    const label = BALL_STATUS_MAP[normalized] || ball;
+    const classes = ["ball-pill"];
+
+    if (/w|\^1|\^2|\^3/i.test(ball)) {
+      classes.push("wicket", "event-pulse");
+    } else if (normalized === "6" || normalized === "six") {
+      classes.push("six", "event-pulse");
+    } else if (normalized === "4" || normalized === "four") {
+      classes.push("four", "event-pulse");
+    }
+
+    pill.className = classes.join(" ");
+    pill.title = label;
+    pill.textContent = ball;
+    wrap.append(pill);
+  });
+  return wrap;
+}
+
+function createLiveScoreSection() {
+  const section = document.createElement("section");
+  section.className = "live-score-section cricket-score";
+
+  if (liveScoreState.error) {
+    section.innerHTML = `<div class="score-title">Live Score</div><div class="live-score-error">${liveScoreState.error}</div>`;
+    return section;
+  }
+
+  if (!liveScoreState.data) {
+    section.innerHTML = '<div class="score-title">Live Score</div><div class="live-score-empty">Loading score...</div>';
+    return section;
+  }
+
+  const model = readScoreModel(liveScoreState.data);
+  section.innerHTML = `
+    <div class="score-title">${simpleValue(model.title)}</div>
+    <div class="score-hero">
+      <div class="team-score">
+        <span class="team-name">${simpleValue(model.battingTeam)}</span>
+        <div class="score-line">
+          <strong>${formatScore(model.score, model.wickets)}</strong>
+          <span>${simpleValue(model.overs)}</span>
+        </div>
+      </div>
+      <div class="ball-status">${simpleValue(model.statusText)}</div>
+      <div class="score-meta">
+        <span>${model.crr ? `CRR : ${model.crr}` : ""}</span>
+        <strong>${model.next ? simpleValue(model.next) : (model.bowlingTeam ? `${model.bowlingTeam} to Bowl` : "-")}</strong>
+      </div>
+    </div>
+    <div class="score-live-grid">
+      <div class="score-player-card">
+        <span>Batsmen</span>
+        <strong>${formatPlayerLine(model.striker, model.strikerRuns, model.strikerBalls)}</strong>
+        <strong>${formatPlayerLine(model.nonStriker, model.nonStrikerRuns, model.nonStrikerBalls)}</strong>
+      </div>
+      <div class="score-player-card">
+        <span>Bowler</span>
+        <strong>${simpleValue(model.bowler)}</strong>
+        <strong>${simpleValue(model.bowlerFigures)}</strong>
+      </div>
+      <div class="score-player-card">
+        <span>Projected Score</span>
+        <strong>${simpleValue(model.projected)}</strong>
+      </div>
+    </div>
+  `;
+
+  const ballsCard = document.createElement("div");
+  ballsCard.className = "score-over-card";
+  ballsCard.innerHTML = "<span>Recent Balls</span>";
+  ballsCard.append(createBallPills(model.overBalls || model.statusCode));
+  section.append(ballsCard);
+
+  return section;
 }
 
 function createStatusNode(status) {
@@ -404,6 +682,7 @@ function renderPayload(payload) {
   const fancyRows = rows.filter((row) => row.marketType === "FANCY");
 
   const fragment = document.createDocumentFragment();
+  fragment.append(createLiveScoreSection());
 
   if (bookmakerRows.length) fragment.append(createMarketSection("Bookmaker", ["Bookmaker", "Back", "Lay"], bookmakerRows, false));
   if (fancyRows.length) fragment.append(createMarketSection("Fancy", ["Bookmaker", "No", "Yes"], fancyRows, true));
@@ -438,9 +717,12 @@ async function fetchSelectedEvent({ manual = false } = {}) {
   setStatus(manual ? "Fetching odds..." : "Auto-refreshing...", selectedEventName || selectedEventId);
 
   try {
-    const response = await fetch(`/api/event-fancy?id=${encodeURIComponent(selectedEventId)}`);
-    const payload = await response.json();
-    if (!response.ok) throw new Error(payload.detail || payload.error || "Request failed.");
+    const [oddsResult] = await Promise.all([
+      fetch(`/api/event-fancy?id=${encodeURIComponent(selectedEventId)}`),
+      fetchLiveScore()
+    ]);
+    const payload = await oddsResult.json();
+    if (!oddsResult.ok) throw new Error(payload.detail || payload.error || "Request failed.");
     renderPayload(payload);
     setStatus("Live", `${selectedEventName || selectedEventId} - ${new Date(payload.fetchedAt).toLocaleTimeString()}`);
   } catch (error) {
@@ -467,6 +749,7 @@ function stopAutoRefresh() {
 
 async function initialize() {
   setStatus("Loading", "Reading Google Sheets config");
+  rowStats = loadRowStats();
 
   try {
     const config = await fetchSheetConfig();

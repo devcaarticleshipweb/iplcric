@@ -104,6 +104,7 @@ input {
 
 .summary,
 .market-section,
+.live-score-section,
 .raw-panel,
 .empty-state,
 .error-state {
@@ -111,6 +112,181 @@ input {
   border-radius: 10px;
   background: var(--surface);
   overflow: hidden;
+}
+
+.cricket-score {
+  background: #101923;
+}
+
+.score-title {
+  padding: 16px 28px;
+  color: #bdd0df;
+  border-bottom: 1px solid #23303d;
+}
+
+.score-hero {
+  display: grid;
+  grid-template-columns: 1fr 160px 1fr;
+  align-items: center;
+  min-height: 138px;
+  padding: 24px 34px;
+  border-bottom: 1px solid #23303d;
+}
+
+.team-score {
+  display: grid;
+  gap: 4px;
+}
+
+.team-name {
+  color: #dbe6ef;
+  font-size: 1.35rem;
+}
+
+.team-score strong {
+  color: #5ee090;
+  font-size: 1.8rem;
+}
+
+.score-line {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+}
+
+.score-line span {
+  color: #a8b7c5;
+  font-size: 1.05rem;
+  font-weight: 800;
+}
+
+.ball-status {
+  color: #efe388;
+  font-size: 1.85rem;
+  font-weight: 900;
+  text-align: center;
+}
+
+.score-meta {
+  display: grid;
+  gap: 8px;
+  justify-items: end;
+  color: #94a2af;
+}
+
+.score-meta strong {
+  color: #f0a32d;
+}
+
+.score-live-grid {
+  display: grid;
+  grid-template-columns: 1.2fr 1fr 1fr;
+  gap: 0;
+  padding: 26px 28px 18px;
+}
+
+.score-player-card {
+  min-height: 92px;
+  padding: 10px 22px;
+  border-right: 1px solid #23303d;
+}
+
+.score-player-card:last-child {
+  border-right: 0;
+}
+
+.score-player-card span,
+.score-over-card > span {
+  display: block;
+  color: #8fa0ae;
+  margin-bottom: 12px;
+}
+
+.score-player-card strong {
+  display: block;
+  margin-bottom: 7px;
+  color: #e7f0f8;
+  font-weight: 700;
+}
+
+.score-over-card {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 16px;
+  align-items: center;
+  padding: 12px 28px 24px;
+}
+
+.score-balls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.ball-pill {
+  min-width: 30px;
+  height: 30px;
+  display: grid;
+  place-items: center;
+  border-radius: 999px;
+  color: #dfeaf4;
+  background: #172534;
+  border: 1px solid #304457;
+  font-weight: 800;
+  font-size: 0.82rem;
+}
+
+.ball-pill.wicket {
+  color: #fff;
+  background: #9c3649;
+}
+
+.ball-pill.six {
+  color: #062d1e;
+  background: #58d68d;
+  border-color: #8cf0b5;
+}
+
+.ball-pill.four {
+  color: #061d38;
+  background: #69b7ff;
+  border-color: #9fd0ff;
+}
+
+.ball-pill.event-pulse {
+  animation: ballEventPulse 0.9s ease-out infinite;
+}
+
+@keyframes ballEventPulse {
+  0% {
+    transform: scale(1);
+    box-shadow: 0 0 0 rgba(255, 255, 255, 0);
+  }
+  50% {
+    transform: scale(1.12);
+    box-shadow: 0 0 18px currentColor;
+  }
+  100% {
+    transform: scale(1);
+    box-shadow: 0 0 0 rgba(255, 255, 255, 0);
+  }
+}
+
+.ball-pill.muted {
+  color: var(--muted);
+}
+
+.live-score-error,
+.live-score-empty {
+  padding: 22px 28px;
+}
+
+.live-score-error {
+  color: var(--danger);
+}
+
+.live-score-empty {
+  color: var(--muted);
 }
 
 .summary {
@@ -409,6 +585,25 @@ pre {
   .summary-item:last-child {
     border-bottom: 0;
   }
+
+  .score-hero {
+    grid-template-columns: 1fr;
+    gap: 18px;
+    text-align: center;
+  }
+
+  .score-meta {
+    justify-items: center;
+  }
+
+  .score-live-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .score-player-card {
+    border-right: 0;
+    border-bottom: 1px solid #23303d;
+  }
 }
 
 @media (max-width: 760px) {
@@ -430,6 +625,18 @@ pre {
 
   .price-box {
     min-height: 64px;
+  }
+
+  .score-title,
+  .score-hero,
+  .score-live-grid,
+  .score-over-card {
+    padding-left: 14px;
+    padding-right: 14px;
+  }
+
+  .score-over-card {
+    grid-template-columns: 1fr;
   }
 
   .name-text {
