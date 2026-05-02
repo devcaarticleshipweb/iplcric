@@ -1,3 +1,4 @@
 /api/event-fancy /.netlify/functions/event-fancy 200
 /api/sheet-config /.netlify/functions/sheet-config 200
 /api/live-score /.netlify/functions/live-score 200
+/api/mcenter/livescore/:matchId /.netlify/functions/live-score?matchId=:matchId 200

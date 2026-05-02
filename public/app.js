@@ -28,6 +28,7 @@ let liveScoreState = {
   error: "",
   fetchedAt: ""
 };
+let lastOverStripSignature = "";
 
 function setStatus(message, meta = "") {
   statusText.textContent = message;
@@ -158,7 +159,8 @@ function normalizeEvents(rows) {
     .map((row) => ({
       id: getFieldValue(row, ["event_id", "eventid", "id", "event"]),
       name: getFieldValue(row, ["event_name", "eventname", "name", "title", "match"]),
-      scoreKey: getFieldValue(row, ["score_key", "scorekey", "live_score_key", "livescorekey", "key", "score"])
+      scoreKey: getFieldValue(row, ["score_key", "scorekey", "live_score_key", "livescorekey", "key", "score"]),
+      cricbuzzMatchId: getFieldValue(row, ["cricbuzz_match_id", "cricbuzzmatchid", "cricbuzz_id", "cricbuzzid", "match_id", "matchid"])
     }))
     .filter((event) => event.id);
 
@@ -329,19 +331,30 @@ async function fetchLiveScore() {
   try {
     const selected = eventRows.find((event) => event.id === selectedEventId);
     const scoreKey = selected?.scoreKey || "";
+    const cricbuzzMatchId = selected?.cricbuzzMatchId || "";
 
     if (!scoreKey) {
       throw new Error("Live score key missing in Events sheet.");
     }
 
-    const response = await fetch(`/api/live-score?key=${encodeURIComponent(scoreKey)}`);
-    const payload = await response.json();
-    if (!response.ok) throw new Error(payload.detail || payload.error || "Live score request failed.");
+    const scorePayload = await fetchJsonPayload(`/api/live-score?key=${encodeURIComponent(scoreKey)}`);
+    let cricbuzzPayload = null;
+
+    if (cricbuzzMatchId) {
+      try {
+        cricbuzzPayload = await fetchJsonPayload(`/api/mcenter/livescore/${encodeURIComponent(cricbuzzMatchId)}`);
+      } catch {
+        cricbuzzPayload = null;
+      }
+    }
 
     liveScoreState = {
-      data: payload.data,
+      data: {
+        scoreData: scorePayload.data,
+        cricbuzzData: cricbuzzPayload?.data || null
+      },
       error: "",
-      fetchedAt: payload.fetchedAt
+      fetchedAt: scorePayload.fetchedAt
     };
   } catch (error) {
     liveScoreState = {
@@ -352,6 +365,27 @@ async function fetchLiveScore() {
   }
 }
 
+async function fetchJsonPayload(url) {
+  const response = await fetch(url);
+  const text = await response.text();
+  let payload = null;
+
+  try {
+    payload = text ? JSON.parse(text) : {};
+  } catch {
+    payload = { error: text || "Live score request failed." };
+  }
+
+  if (!response.ok) {
+    const message = payload.detail || payload.error || `Live score request failed (${response.status}).`;
+    const error = new Error(message);
+    error.status = response.status;
+    throw error;
+  }
+
+  return payload;
+}
+
 const BALL_STATUS_MAP = {
   b: "Ball",
   o: "Over",
@@ -359,6 +393,7 @@ const BALL_STATUS_MAP = {
   ba: "Ball in Air",
   f: "Fast Bowler",
   s: "Spin Bowler",
+  ruka: "Bowler Stopped",
   "^1": "Bowled",
   "^2": "Caught Out",
   "^3": "Caught and Bowled",
@@ -366,6 +401,8 @@ const BALL_STATUS_MAP = {
   nb: "No Ball",
   lb: "Leg Bye",
   by: "Bye",
+  "4": "Four",
+  "6": "Six",
   four: "Four",
   six: "Six"
 };
@@ -403,35 +440,271 @@ function firstScoreValue(objects, candidates) {
   return "";
 }
 
-function readScoreModel(data) {
-  const objects = flattenScoreObjects(data);
-  const selected = eventRows.find((event) => event.id === selectedEventId);
-  const teams = splitEventTeams(selectedEventName || selected?.name || "");
-  const scoreParts = parseScoreJ(firstScoreValue(objects, ["j", "score_over", "scoreOver", "innings"]));
-  const statusCode = String(firstScoreValue(objects, ["b", "ball_status", "ballStatus", "status_code", "statusCode"]) || "").trim();
-  const statusText = BALL_STATUS_MAP[statusCode.toLowerCase()] || statusCode || "Live";
+function firstExactScoreValue(objects, candidates) {
+  const normalized = candidates.map((key) => key.toLowerCase());
+
+  for (const obj of objects) {
+    if (!isPlainObject(obj)) continue;
+    for (const [key, value] of Object.entries(obj)) {
+      if (value === null || value === undefined || value === "") continue;
+      if (normalized.includes(key.toLowerCase())) return value;
+    }
+  }
+  return "";
+}
+
+function scoreFieldValue(objects, source, keyName) {
+  const exact = firstExactScoreValue(objects, [keyName]);
+  if (exact !== "") return exact;
+
+  try {
+    const escaped = keyName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const text = JSON.stringify(source);
+    const direct = text.match(new RegExp(`"${escaped}"\\s*:\\s*"([^"]*)"`, "i"));
+    if (direct) return direct[1];
+
+    const nested = text.match(new RegExp(`\\\\"${escaped}\\\\"\\s*:\\s*\\\\"([^"\\\\]*)`, "i"));
+    return nested ? nested[1] : "";
+  } catch {
+    return "";
+  }
+}
+
+function scoreOverValues(objects, source) {
+  for (const obj of objects) {
+    if (!isPlainObject(obj)) continue;
+    const entries = Object.entries(obj);
+    const hasLastOver = entries.some(([key, value]) => key.toLowerCase() === "n" && parsePastOver(value));
+    if (!hasLastOver) continue;
+
+    const grouped = ["l", "m", "n"].map((wanted) => {
+      const match = entries.find(([key]) => key.toLowerCase() === wanted);
+      return match && parsePastOver(match[1]) ? match[1] : "";
+    });
+
+    if (grouped.filter(Boolean).length > 1) return grouped;
+  }
+
+  const nearby = scoreOverValuesFromText(source);
+  if (nearby.filter(Boolean).length > 1) return nearby;
+
+  const values = ["l", "m", "n"].map((key) => {
+    const value = scoreFieldValue(objects, source, key);
+    return parsePastOver(value) ? value : "";
+  }).filter(Boolean);
+  if (values.length >= 3) return values;
+
+  try {
+    const text = JSON.stringify(source).replace(/\\"/g, '"');
+    const matches = [...text.matchAll(/"([0-9]{1,2}:[^"]+)"/g)].map((match) => match[1]);
+    const unique = [...new Set(matches)].filter((value) => /^\d{1,2}:/.test(value));
+    unique.sort((a, b) => Number(a.split(":")[0]) - Number(b.split(":")[0]));
+    return unique.slice(-3);
+  } catch {
+    return values;
+  }
+}
+
+function scoreOverValuesFromText(source) {
+  try {
+    const text = JSON.stringify(source).replace(/\\"/g, '"').replace(/\\\\/g, "\\");
+    const found = {};
+    const patterns = [
+      /["']?([lmn])["']?\s*[:=]\s*["']?(\d{1,2}:[0-9a-zA-Z.^]+)["']?/g,
+      /\\?["']([lmn])\\?["']\s*:\s*\\?["'](\d{1,2}:[0-9a-zA-Z.^]+)\\?["']/g
+    ];
+
+    patterns.forEach((pattern) => {
+      let match = pattern.exec(text);
+      while (match) {
+        const key = match[1].toLowerCase();
+        const value = match[2];
+        if (parsePastOver(value)) found[key] = value;
+        match = pattern.exec(text);
+      }
+    });
+
+    return [found.l || "", found.m || "", found.n || ""];
+  } catch {
+    return ["", "", ""];
+  }
+}
+
+function findObjectWithKeys(objects, candidates) {
+  const normalized = candidates.map((key) => key.toLowerCase().replace(/[^a-z0-9]/g, ""));
+
+  for (const obj of objects) {
+    if (!isPlainObject(obj)) continue;
+    const keys = Object.keys(obj).map((key) => key.toLowerCase().replace(/[^a-z0-9]/g, ""));
+    if (normalized.some((key) => keys.includes(key))) return obj;
+  }
+  return null;
+}
+
+function firstBatterValue(objects, keyName, fallbackName) {
+  const target = keyName.toLowerCase().replace(/[^a-z0-9^]/g, "");
+
+  for (const obj of objects) {
+    for (const [key, value] of Object.entries(obj)) {
+      if (value === null || value === undefined || value === "") continue;
+      const norm = key.toLowerCase().replace(/[^a-z0-9^]/g, "");
+      if (norm !== target) continue;
+
+      const batter = parseBatterField(value, fallbackName);
+      if (batter.name || batter.runs || batter.balls) return batter;
+    }
+  }
+  return {};
+}
+
+function parseCricbuzzBatter(player, forceStriker = false) {
+  if (!isPlainObject(player)) return {};
+  const name = player.batName || player.name || player.fullName || player.nickName || player.batsmanName || "";
+  const runs = player.batRuns ?? player.runs ?? player.score ?? "";
+  const balls = player.batBalls ?? player.balls ?? "";
+  const isStriker = forceStriker || Boolean(player.isStriker || player.strike || player.onStrike);
+  return {
+    name: `${name || "Batter"}${isStriker ? " *" : ""}`,
+    runs: String(runs || ""),
+    balls: String(balls || ""),
+    isStriker
+  };
+}
+
+function formatCricbuzzBowlerFigures(player) {
+  if (!isPlainObject(player)) return "";
+  const overs = player.bowlOvs ?? player.overs ?? player.ovs ?? "";
+  const runs = player.bowlRuns ?? player.runs ?? "";
+  const wickets = player.bowlWkts ?? player.wickets ?? player.wkts ?? "";
+  const economy = player.bowlEcon ?? player.economy ?? player.econ ?? "";
+  const parts = [];
+  if (overs !== "") parts.push(`${overs} ov`);
+  if (wickets !== "" || runs !== "") parts.push(`${simpleValue(wickets)}-${simpleValue(runs)}`);
+  if (economy !== "") parts.push(`Econ ${economy}`);
+  return parts.join(" ");
+}
+
+function readCricbuzzModel(data, objects, teams) {
+  const header = data?.matchHeader || findObjectWithKeys(objects, ["matchDescription", "team1", "team2"]);
+  const miniscore = data?.miniscore || data?.miniScore || findObjectWithKeys(objects, ["matchScoreDetails", "batsmanStriker", "bowlerStriker"]);
+  const scoreDetails = miniscore?.matchScoreDetails || data?.matchScoreDetails || {};
+  const innings = scoreDetails?.inningsScoreList || miniscore?.inningsScoreList || data?.inningsScoreList || [];
+  const inningsList = Array.isArray(innings) ? innings.filter(isPlainObject) : [];
+  const activeInnings = inningsList[inningsList.length - 1] || {};
+  const team1 = header?.team1?.name || header?.team1?.teamName || header?.team1?.shortName || teams[0];
+  const team2 = header?.team2?.name || header?.team2?.teamName || header?.team2?.shortName || teams[1];
+  const batTeamName =
+    miniscore?.batTeamName ||
+    miniscore?.batTeam?.batTeamName ||
+    scoreDetails?.batTeamName ||
+    activeInnings.batTeamName ||
+    activeInnings.teamName ||
+    activeInnings.batTeamShortName ||
+    firstScoreValue(objects, ["batTeamName"]) ||
+    "";
+  const battingTeam = batTeamName || (inningsList.length > 1 ? team2 : team1);
+  const bowlingTeam = battingTeam === team2 ? team1 : team2;
+  const striker = parseCricbuzzBatter(miniscore?.batsmanStriker || data?.batsmanStriker || miniscore?.striker, true);
+  const nonStriker = parseCricbuzzBatter(miniscore?.batsmanNonStriker || data?.batsmanNonStriker || miniscore?.nonStriker, false);
+  const bowler = miniscore?.bowlerStriker || miniscore?.currentBowler || {};
+  const runs = activeInnings.score ?? activeInnings.runs ?? "";
+  const wickets = activeInnings.wickets ?? activeInnings.wkts ?? "";
+  const overs = activeInnings.overs ?? activeInnings.ovs ?? "";
+  const balls = oversToBalls(overs);
+  const crr = balls > 0 && runs !== "" ? ((Number(runs) * 6) / balls).toFixed(2) : "";
+
+  if (!header && !miniscore && inningsList.length === 0) return null;
 
   return {
-    title: firstScoreValue(objects, ["title", "match_title", "matchTitle", "match", "name"]) || selectedEventName || "Live Match",
-    battingTeam: firstScoreValue(objects, ["batting_team", "battingTeam", "team", "batteam", "btm", "t1"]) || teams[0],
-    bowlingTeam: firstScoreValue(objects, ["bowling_team", "bowlingTeam", "bowlteam", "t2"]) || teams[1],
-    score: firstScoreValue(objects, ["score", "runs", "inning_score", "inningsScore", "scr"]) || scoreParts.runs,
-    wickets: firstScoreValue(objects, ["wickets", "wkts", "wicket", "w"]) || scoreParts.wickets,
-    overs: scoreParts.overs || firstScoreValue(objects, ["overs", "over", "ov"]),
-    crr: firstScoreValue(objects, ["crr", "current_run_rate", "currentRunRate", "rr", "runrate"]) || scoreParts.crr,
-    next: firstScoreValue(objects, ["next_to_bowl", "nextToBowl", "opt_to_bowl", "optToBowl", "message", "commentary"]) || "",
-    striker: firstScoreValue(objects, ["striker", "batsman1", "batsman", "bat1", "p1"]) || "",
-    strikerRuns: firstScoreValue(objects, ["striker_runs", "batsman1_runs", "bat1_runs", "r1"]) || "",
-    strikerBalls: firstScoreValue(objects, ["striker_balls", "batsman1_balls", "bat1_balls", "b1"]) || "",
-    nonStriker: firstScoreValue(objects, ["non_striker", "nonStriker", "batsman2", "bat2", "p2"]) || "",
-    nonStrikerRuns: firstScoreValue(objects, ["non_striker_runs", "batsman2_runs", "bat2_runs", "r2"]) || "",
-    nonStrikerBalls: firstScoreValue(objects, ["non_striker_balls", "batsman2_balls", "bat2_balls", "b2"]) || "",
-    bowler: firstScoreValue(objects, ["bowler", "current_bowler", "currentBowler", "blw"]) || "",
-    bowlerFigures: firstScoreValue(objects, ["bowler_figures", "bowlerFigures", "figures", "bowl_fig"]) || "",
+    title: header?.matchDescription || header?.matchDesc || header?.status || selectedEventName || "Live Match",
+    battingTeam,
+    bowlingTeam,
+    score: runs,
+    wickets,
+    overs,
+    crr: miniscore?.currentRunRate || miniscore?.crr || crr,
+    next: header?.status || miniscore?.status || "",
+    striker: striker.name || "",
+    strikerRuns: striker.runs || "",
+    strikerBalls: striker.balls || "",
+    nonStriker: nonStriker.name || "",
+    nonStrikerRuns: nonStriker.runs || "",
+    nonStrikerBalls: nonStriker.balls || "",
+    bowler: bowler.bowlName || bowler.name || bowler.bowlerName || "",
+    bowlerFigures: formatCricbuzzBowlerFigures(bowler)
+  };
+}
+
+function readScoreModel(data) {
+  const scoreData = isPlainObject(data) && Object.prototype.hasOwnProperty.call(data, "scoreData") ? data.scoreData : data;
+  const cricbuzzData = isPlainObject(data) && Object.prototype.hasOwnProperty.call(data, "cricbuzzData") ? data.cricbuzzData : null;
+  const objects = flattenScoreObjects(scoreData);
+  const cricbuzzObjects = cricbuzzData ? flattenScoreObjects(cricbuzzData) : [];
+  const selected = eventRows.find((event) => event.id === selectedEventId);
+  const teams = splitEventTeams(selectedEventName || selected?.name || "");
+  const cricbuzz = cricbuzzData ? readCricbuzzModel(cricbuzzData, cricbuzzObjects, teams) : null;
+  const firstInningsRaw = firstScoreValue(objects, ["j"]);
+  const secondInningsRaw = firstScoreValue(objects, ["k"]);
+  const isSecondInnings = Boolean(firstInningsRaw && secondInningsRaw);
+  const firstInnings = parseScoreJ(firstInningsRaw);
+  const activeInnings = parseScoreJ(secondInningsRaw || firstInningsRaw || firstScoreValue(objects, ["score_over", "scoreOver", "innings"]));
+  const activeTeam = isSecondInnings ? teams[1] : teams[0];
+  const fieldingTeam = isSecondInnings ? teams[0] : teams[1];
+  const target = isSecondInnings && firstInnings.runs ? Number(firstInnings.runs) + 1 : "";
+  const ballsRemaining = isSecondInnings ? Math.max(0, 120 - oversToBalls(activeInnings.overs)) : "";
+  const runsNeeded = isSecondInnings && target !== "" ? Math.max(0, target - Number(activeInnings.runs || 0)) : "";
+  const chaseComplete = isSecondInnings && target !== "" && runsNeeded === 0;
+  const rrr = isSecondInnings && ballsRemaining > 0 ? ((runsNeeded * 6) / ballsRemaining).toFixed(2) : "";
+  const chaseMessage = isSecondInnings && !chaseComplete ? `${activeTeam || "Team 2"} need ${runsNeeded} runs in ${ballsRemaining} balls` : "";
+  const statusCode = String(firstScoreValue(objects, ["b", "ball_status", "ballStatus", "status_code", "statusCode"]) || "").trim();
+  const statusText = BALL_STATUS_MAP[statusCode.toLowerCase()] || statusCode || "Live";
+  const bowlerFigures = formatGoScorerBowlerFigures(firstScoreValue(objects, ["c"])) || firstScoreValue(objects, ["bowler_figures", "bowlerFigures", "figures", "bowl_fig"]) || "";
+  const overValues = scoreOverValues(objects, scoreData);
+  const overLast1 = parsePastOver(scoreFieldValue(objects, scoreData, "n")) ? scoreFieldValue(objects, scoreData, "n") : overValues[2] || "";
+  const overLast2 = parsePastOver(scoreFieldValue(objects, scoreData, "m")) ? scoreFieldValue(objects, scoreData, "m") : overValues[1] || "";
+  const overLast3 = parsePastOver(scoreFieldValue(objects, scoreData, "l")) ? scoreFieldValue(objects, scoreData, "l") : overValues[0] || "";
+  const qBatter = firstBatterValue(objects, "q", "Batter 1");
+  const sBatter = firstBatterValue(objects, "s", "Batter 2");
+  const parsedBatters = [qBatter, sBatter].filter((batter) => batter.name || batter.runs || batter.balls);
+  const orderedBatters = parsedBatters.length
+    ? [...parsedBatters].sort((a, b) => Number(b.isStriker) - Number(a.isStriker))
+    : [];
+  const firstBatter = orderedBatters[0] || {};
+  const secondBatter = orderedBatters[1] || {};
+
+  return {
+    title: cricbuzz?.title || firstScoreValue(objects, ["title", "match_title", "matchTitle", "match", "name"]) || selectedEventName || "Live Match",
+    battingTeam: cricbuzz?.battingTeam || (isSecondInnings ? activeTeam : firstScoreValue(objects, ["batting_team", "battingTeam", "team", "batteam", "btm", "t1"]) || activeTeam),
+    bowlingTeam: cricbuzz?.bowlingTeam || (isSecondInnings ? fieldingTeam : firstScoreValue(objects, ["bowling_team", "bowlingTeam", "bowlteam", "t2"]) || fieldingTeam),
+    score: isSecondInnings ? activeInnings.runs : firstScoreValue(objects, ["score", "runs", "inning_score", "inningsScore", "scr"]) || activeInnings.runs,
+    wickets: isSecondInnings ? activeInnings.wickets : firstScoreValue(objects, ["wickets", "wkts", "wicket", "w"]) || activeInnings.wickets,
+    overs: activeInnings.overs || firstScoreValue(objects, ["overs", "over", "ov"]),
+    crr: chaseComplete ? "" : (isSecondInnings ? activeInnings.crr : firstScoreValue(objects, ["crr", "current_run_rate", "currentRunRate", "rr", "runrate"]) || activeInnings.crr),
+    rrr: chaseComplete ? "" : rrr,
+    completedTeam: chaseComplete ? (fieldingTeam || "Team 1") : "",
+    completedScore: chaseComplete ? firstInnings.runs : "",
+    completedWickets: chaseComplete ? firstInnings.wickets : "",
+    completedOvers: chaseComplete ? firstInnings.overs : "",
+    next: chaseComplete ? "" : chaseMessage || firstScoreValue(objects, ["next_to_bowl", "nextToBowl", "opt_to_bowl", "optToBowl", "message", "commentary"]) || "",
+    striker: cricbuzz?.striker || firstBatter.name || firstScoreValue(objects, ["striker", "batsman1", "batsman", "bat1", "p1"]) || "",
+    strikerRuns: firstBatter.runs || firstScoreValue(objects, ["striker_runs", "batsman1_runs", "bat1_runs", "r1"]) || "",
+    strikerBalls: firstBatter.balls || firstScoreValue(objects, ["striker_balls", "batsman1_balls", "bat1_balls", "b1"]) || "",
+    nonStriker: cricbuzz?.nonStriker || secondBatter.name || firstScoreValue(objects, ["non_striker", "nonStriker", "batsman2", "bat2", "p2"]) || "",
+    nonStrikerRuns: secondBatter.runs || firstScoreValue(objects, ["non_striker_runs", "batsman2_runs", "bat2_runs", "r2"]) || "",
+    nonStrikerBalls: secondBatter.balls || firstScoreValue(objects, ["non_striker_balls", "batsman2_balls", "bat2_balls", "b2"]) || "",
+    bowler: cricbuzz?.bowler || firstScoreValue(objects, ["bowler", "current_bowler", "currentBowler", "blw"]) || "",
+    bowlerFigures,
     statusCode,
     statusText,
     overBalls: firstScoreValue(objects, ["A", "balls", "this_over", "thisOver", "last_over", "lastOver", "recentBalls"]) || "",
-    projected: firstScoreValue(objects, ["projected", "projected_score", "projectedScore", "projection"]) || ""
+    overHistory: {
+      current: scoreFieldValue(objects, scoreData, "A") || "",
+      last1: overLast1,
+      last2: overLast2,
+      last3: overLast3
+    },
+    projectedLabel: target ? "Target" : "Projected Score",
+    projected: target || firstScoreValue(objects, ["projected", "projected_score", "projectedScore", "projection"]) || ""
   };
 }
 
@@ -472,23 +745,215 @@ function oversToBalls(overs) {
   return completedOvers * 6 + balls;
 }
 
+function ballsToOvers(value) {
+  const totalBalls = Number(value);
+  if (!Number.isFinite(totalBalls) || totalBalls < 0) return "";
+  const overs = Math.floor(totalBalls / 6);
+  const balls = totalBalls % 6;
+  return `${overs}.${balls}`;
+}
+
+function formatGoScorerBowlerFigures(value) {
+  const parts = String(value || "").split(".").map((part) => part.trim());
+  if (parts.length < 3 || parts.some((part) => part === "")) return "";
+
+  const [runs, balls, wickets] = parts;
+  const overs = ballsToOvers(balls);
+  return `${simpleValue(wickets)}-${simpleValue(runs)}${overs ? ` (${overs})` : ""}`;
+}
+
+function parseBatterField(value, fallbackName = "Batter") {
+  const raw = String(value || "").replace(/\s+/g, " ").trim();
+  if (!raw) return {};
+
+  if (raw.length > 80 || /[|,]/.test(raw)) return {};
+
+  const scoreMatches = raw.match(/\*?\d+\.\d+\*?/g) || [];
+  if (scoreMatches.length !== 1) return {};
+
+  const scoreMatch = scoreMatches[0];
+  const isStriker = raw.includes("*");
+  const scoreText = scoreMatch.replace(/\*/g, "");
+  const [runs = "", balls = ""] = scoreText.split(".");
+  const name = raw
+    .replace(scoreMatch, "")
+    .replace(/\*/g, "")
+    .replace(/[-:|]+$/g, "")
+    .trim();
+
+  return {
+    name: `${name || fallbackName}${isStriker ? " *" : ""}`,
+    runs,
+    balls,
+    isStriker
+  };
+}
+
 function formatScore(score, wickets) {
   if (!score && !wickets) return "-";
   if (score && String(score).includes("-")) return String(score);
   return `${simpleValue(score)}-${simpleValue(wickets)}`;
 }
 
+function formatOvers(overs) {
+  const value = simpleValue(overs);
+  return value === "-" ? value : `(${value})`;
+}
+
 function formatPlayerLine(name, runs, balls) {
   if (!name) return "-";
+  const isStriker = String(name).includes("*");
+  const cleanName = String(name).replace(/\*/g, "").trim();
+  const nameMarkup = `${simpleValue(cleanName)}${isStriker ? ' <span class="bat-icon" title="On strike">🏏</span>' : ""}`;
   const score = runs || balls ? ` ${simpleValue(runs)} (${simpleValue(balls)})` : "";
-  return `${name}${score}`;
+  return `${nameMarkup}${score}`;
+}
+
+function tokenizeBallEvents(value) {
+  const raw = Array.isArray(value) ? value : String(value || "").split(/[\s,.|/]+/);
+  return raw.map((ball) => String(ball).trim()).filter(Boolean);
+}
+
+function ballRunValue(ball) {
+  const token = String(ball || "").trim().toLowerCase();
+  const numeric = Number(token);
+  if (Number.isFinite(numeric)) return numeric;
+  if (token === "wd" || token === "wide" || token === "nb" || token === "noball") return 1;
+  return 0;
+}
+
+function parsePastOver(value) {
+  const text = String(value || "").trim();
+  if (!text) return null;
+
+  const [overNo, ballsText = ""] = text.split(":");
+  if (!/^\d{1,2}$/.test(overNo.replace(/\\"/g, "").trim())) return null;
+  const balls = ballsText.replace(/\\"/g, "").split(".").map((ball) => ball.trim()).filter(Boolean);
+  if (!overNo || balls.length === 0) return null;
+
+  return {
+    number: Number(overNo),
+    label: `Over ${overNo.replace(/\\"/g, "")}`,
+    balls,
+    total: balls.reduce((sum, ball) => sum + ballRunValue(ball), 0)
+  };
+}
+
+function parseCurrentOver(value, label) {
+  const balls = tokenizeBallEvents(value);
+  if (balls.length === 0) return null;
+  const slots = [...balls];
+  while (slots.length < 6) slots.push("");
+
+  return {
+    label: label || "Current",
+    balls: slots,
+    total: balls.reduce((sum, ball) => sum + ballRunValue(ball), 0)
+  };
+}
+
+function createOverStrip(model) {
+  const strip = document.createElement("div");
+  strip.className = "over-strip";
+
+  const historyOvers = [
+    parsePastOver(model.overHistory?.last3),
+    parsePastOver(model.overHistory?.last2),
+    parsePastOver(model.overHistory?.last1)
+  ].filter(Boolean);
+  const lastOverNo = parsePastOver(model.overHistory?.last1)?.number;
+  const currentLabel = Number.isFinite(lastOverNo) ? `Over ${lastOverNo + 1}` : "Current";
+  const currentOver = parseCurrentOver(model.overHistory?.current, currentLabel);
+
+  if (historyOvers.length === 0 && !currentOver) return strip;
+
+  historyOvers.forEach((over) => {
+    const item = document.createElement("div");
+    item.className = "over-strip-item";
+
+    const title = document.createElement("span");
+    title.className = "over-label";
+    title.textContent = over.label;
+    item.append(title);
+
+    const balls = document.createElement("div");
+    balls.className = "score-balls";
+    over.balls.forEach((ball) => balls.append(createBallPill(ball)));
+    item.append(balls);
+
+    const total = document.createElement("strong");
+    total.className = "over-total";
+    total.textContent = `= ${over.total}`;
+    item.append(total);
+
+    strip.append(item);
+  });
+
+  if (currentOver) {
+    const item = document.createElement("div");
+    item.className = "over-strip-item current";
+
+    const title = document.createElement("span");
+    title.className = "over-label";
+    title.textContent = currentOver.label;
+    item.append(title);
+
+    const balls = document.createElement("div");
+    balls.className = "score-balls";
+    currentOver.balls.forEach((ball) => balls.append(createBallPill(ball)));
+    item.append(balls);
+
+    const total = document.createElement("strong");
+    total.className = "over-total";
+    total.textContent = `= ${currentOver.total}`;
+    item.append(total);
+
+    strip.append(item);
+  }
+
+  return strip;
+}
+
+function createBallPill(ball) {
+  const pill = document.createElement("span");
+  if (ball === "") {
+    pill.className = "ball-pill muted";
+    pill.textContent = "";
+    return pill;
+  }
+
+  const normalized = String(ball).toLowerCase();
+  const label = BALL_STATUS_MAP[normalized] || ball;
+  const classes = ["ball-pill"];
+  let display = ball;
+
+  if (/w|\^1|\^2|\^3/i.test(ball)) {
+    classes.push("wicket");
+    display = "W";
+  } else if (normalized === "6" || normalized === "six") {
+    classes.push("six");
+    display = "6";
+  } else if (normalized === "4" || normalized === "four") {
+    classes.push("four");
+    display = "4";
+  } else if (normalized === "wd" || normalized === "wide") {
+    classes.push("wide");
+    display = "WD";
+  } else if (normalized === "nb" || normalized === "noball") {
+    classes.push("wide");
+    display = "NB";
+  }
+
+  pill.className = classes.join(" ");
+  pill.title = label;
+  pill.textContent = display;
+  return pill;
 }
 
 function createBallPills(value) {
   const wrap = document.createElement("div");
   wrap.className = "score-balls";
-  const raw = Array.isArray(value) ? value : String(value || "").split(/[\s,.|/]+/);
-  const balls = raw.map((ball) => String(ball).trim()).filter(Boolean).slice(-12);
+  const balls = tokenizeBallEvents(value).slice(-12);
 
   if (balls.length === 0) {
     const pill = document.createElement("span");
@@ -499,23 +964,7 @@ function createBallPills(value) {
   }
 
   balls.forEach((ball) => {
-    const pill = document.createElement("span");
-    const normalized = ball.toLowerCase();
-    const label = BALL_STATUS_MAP[normalized] || ball;
-    const classes = ["ball-pill"];
-
-    if (/w|\^1|\^2|\^3/i.test(ball)) {
-      classes.push("wicket", "event-pulse");
-    } else if (normalized === "6" || normalized === "six") {
-      classes.push("six", "event-pulse");
-    } else if (normalized === "4" || normalized === "four") {
-      classes.push("four", "event-pulse");
-    }
-
-    pill.className = classes.join(" ");
-    pill.title = label;
-    pill.textContent = ball;
-    wrap.append(pill);
+    wrap.append(createBallPill(ball));
   });
   return wrap;
 }
@@ -535,6 +984,7 @@ function createLiveScoreSection() {
   }
 
   const model = readScoreModel(liveScoreState.data);
+  window.__fair91LastScoreModel = model;
   section.innerHTML = `
     <div class="score-title">${simpleValue(model.title)}</div>
     <div class="score-hero">
@@ -542,14 +992,24 @@ function createLiveScoreSection() {
         <span class="team-name">${simpleValue(model.battingTeam)}</span>
         <div class="score-line">
           <strong>${formatScore(model.score, model.wickets)}</strong>
-          <span>${simpleValue(model.overs)}</span>
+          <span>${formatOvers(model.overs)}</span>
         </div>
       </div>
       <div class="ball-status">${simpleValue(model.statusText)}</div>
-      <div class="score-meta">
-        <span>${model.crr ? `CRR : ${model.crr}` : ""}</span>
-        <strong>${model.next ? simpleValue(model.next) : (model.bowlingTeam ? `${model.bowlingTeam} to Bowl` : "-")}</strong>
-      </div>
+      ${model.completedTeam ? `
+        <div class="team-score score-meta-team">
+          <span class="team-name">${simpleValue(model.completedTeam)}</span>
+          <div class="score-line">
+            <strong>${formatScore(model.completedScore, model.completedWickets)}</strong>
+            <span>${formatOvers(model.completedOvers)}</span>
+          </div>
+        </div>
+      ` : `
+        <div class="score-meta">
+          <span>${[model.crr ? `CRR : ${model.crr}` : "", model.rrr ? `RRR : ${model.rrr}` : ""].filter(Boolean).join(" | ")}</span>
+          <strong>${model.next ? simpleValue(model.next) : (model.bowlingTeam ? `${model.bowlingTeam} to Bowl` : "-")}</strong>
+        </div>
+      `}
     </div>
     <div class="score-live-grid">
       <div class="score-player-card">
@@ -563,17 +1023,23 @@ function createLiveScoreSection() {
         <strong>${simpleValue(model.bowlerFigures)}</strong>
       </div>
       <div class="score-player-card">
-        <span>Projected Score</span>
+        <span>${simpleValue(model.projectedLabel || "Projected Score")}</span>
         <strong>${simpleValue(model.projected)}</strong>
       </div>
     </div>
   `;
 
-  const ballsCard = document.createElement("div");
-  ballsCard.className = "score-over-card";
-  ballsCard.innerHTML = "<span>Recent Balls</span>";
-  ballsCard.append(createBallPills(model.overBalls || model.statusCode));
-  section.append(ballsCard);
+  const overStrip = createOverStrip(model);
+  if (overStrip.childElementCount) {
+    section.querySelector(".score-hero").after(overStrip);
+    const signature = JSON.stringify(model.overHistory || {});
+    if (signature !== lastOverStripSignature) {
+      lastOverStripSignature = signature;
+      requestAnimationFrame(() => {
+        overStrip.scrollLeft = overStrip.scrollWidth;
+      });
+    }
+  }
 
   return section;
 }

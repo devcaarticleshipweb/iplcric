@@ -1,4 +1,5 @@
 const LIVE_SCORE_ENDPOINT = "https://api.goscorer.com/api/v3/getSV3";
+const CRICBUZZ_LIVE_SCORE_ENDPOINT = "https://www.cricbuzz.com/api/mcenter/livescore";
 
 function json(statusCode, payload) {
   return {
@@ -13,13 +14,20 @@ function json(statusCode, payload) {
 
 exports.handler = async (event) => {
   const key = String(event.queryStringParameters?.key || "").trim();
+  const pathMatch = String(event.path || event.rawUrl || "").match(/\/api\/mcenter\/livescore\/([^/?#]+)/);
+  const matchId = String(event.queryStringParameters?.matchId || (pathMatch ? decodeURIComponent(pathMatch[1]) : "")).trim();
 
-  if (!key) {
-    return json(400, { error: "Missing required query parameter: key" });
+  if (!key && !matchId) {
+    return json(400, { error: "Missing live score key or Cricbuzz match ID." });
   }
 
-  const upstreamUrl = new URL(LIVE_SCORE_ENDPOINT);
-  upstreamUrl.searchParams.set("key", key);
+  const upstreamUrl = matchId
+    ? new URL(`${CRICBUZZ_LIVE_SCORE_ENDPOINT}/${encodeURIComponent(matchId)}`)
+    : new URL(LIVE_SCORE_ENDPOINT);
+
+  if (!matchId) {
+    upstreamUrl.searchParams.set("key", key);
+  }
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 8000);
 
@@ -28,6 +36,7 @@ exports.handler = async (event) => {
       signal: controller.signal,
       headers: {
         accept: "application/json, text/plain, */*",
+        referer: "https://www.cricbuzz.com/",
         "user-agent": "Fair91OddsViewer/1.0"
       }
     });
@@ -54,6 +63,7 @@ exports.handler = async (event) => {
 
     return json(200, {
       fetchedAt: new Date().toISOString(),
+      sourceType: matchId ? "cricbuzz" : "goscorer",
       source: upstreamUrl.toString(),
       data: body
     });
