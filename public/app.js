@@ -29,6 +29,8 @@ let liveScoreState = {
   fetchedAt: ""
 };
 let lastOverStripSignature = "";
+let overStripScrollLeft = null;
+let liveScoreCompact = false;
 
 function setStatus(message, meta = "") {
   statusText.textContent = message;
@@ -160,7 +162,9 @@ function normalizeEvents(rows) {
       id: getFieldValue(row, ["event_id", "eventid", "id", "event"]),
       name: getFieldValue(row, ["event_name", "eventname", "name", "title", "match"]),
       scoreKey: getFieldValue(row, ["score_key", "scorekey", "live_score_key", "livescorekey", "key", "score"]),
-      cricbuzzMatchId: getFieldValue(row, ["cricbuzz_match_id", "cricbuzzmatchid", "cricbuzz_id", "cricbuzzid", "match_id", "matchid"])
+      cricbuzzMatchId: getFieldValue(row, ["cricbuzz_match_id", "cricbuzzmatchid", "cricbuzz_id", "cricbuzzid", "match_id", "matchid"]),
+      team1Short: getFieldValue(row, ["team1_short", "team1short", "team_1_short", "team 1 short", "team 1 short name", "team1_short_name", "team1shortname", "team1", "team_1", "team 1"]),
+      team2Short: getFieldValue(row, ["team2_short", "team2short", "team_2_short", "team 2 short", "team 2 short name", "team2_short_name", "team2shortname", "team2", "team_2", "team 2"])
     }))
     .filter((event) => event.id);
 
@@ -562,11 +566,17 @@ function parseCricbuzzBatter(player, forceStriker = false) {
   const name = player.batName || player.name || player.fullName || player.nickName || player.batsmanName || "";
   const runs = player.batRuns ?? player.runs ?? player.score ?? "";
   const balls = player.batBalls ?? player.balls ?? "";
+  const fours = player.batFours ?? player.fours ?? player["4s"] ?? player.boundaries ?? "";
+  const sixes = player.batSixes ?? player.sixes ?? player["6s"] ?? "";
+  const strikeRate = player.batStrikeRate ?? player.strikeRate ?? player.sr ?? "";
   const isStriker = forceStriker || Boolean(player.isStriker || player.strike || player.onStrike);
   return {
     name: `${name || "Batter"}${isStriker ? " *" : ""}`,
-    runs: String(runs || ""),
-    balls: String(balls || ""),
+    runs: runs === null || runs === undefined ? "" : String(runs),
+    balls: balls === null || balls === undefined ? "" : String(balls),
+    fours: fours === null || fours === undefined ? "" : String(fours),
+    sixes: sixes === null || sixes === undefined ? "" : String(sixes),
+    strikeRate: strikeRate === null || strikeRate === undefined ? "" : String(strikeRate),
     isStriker
   };
 }
@@ -584,29 +594,249 @@ function formatCricbuzzBowlerFigures(player) {
   return parts.join(" ");
 }
 
-function readCricbuzzModel(data, objects, teams) {
+function economyValue(runs, oversOrBalls, fallback = "") {
+  if (fallback) {
+    const value = Number(fallback);
+    return Number.isFinite(value) ? value.toFixed(2) : simpleValue(fallback);
+  }
+
+  const runValue = Number(runs);
+  if (!Number.isFinite(runValue)) return "-";
+
+  const text = String(oversOrBalls || "").trim();
+  let balls = 0;
+  if (text.includes(".")) {
+    balls = oversToBalls(text);
+  } else {
+    const numeric = Number(text);
+    balls = Number.isFinite(numeric) && numeric > 6 ? numeric : numeric * 6;
+  }
+
+  if (!Number.isFinite(balls) || balls <= 0) return "-";
+  return ((runValue * 6) / balls).toFixed(2);
+}
+
+function parseCricbuzzBowler(player, isCurrent = false) {
+  if (!isPlainObject(player)) return {};
+  const name = player.bowlName || player.name || player.bowlerName || player.fullName || player.nickName || "";
+  const runs = player.bowlRuns ?? player.runs ?? player.conceded ?? "";
+  const overs = player.bowlOvs ?? player.overs ?? player.ovs ?? "";
+  const wickets = player.bowlWkts ?? player.wickets ?? player.wkts ?? "";
+  const extras = player.bowlExtras ?? player.extras ?? player.extraRuns ?? "";
+  const economy = player.bowlEcon ?? player.economy ?? player.econ ?? "";
+
+  if (!name && runs === "" && overs === "" && wickets === "") return {};
+
+  return {
+    name,
+    runs: runs === null || runs === undefined ? "" : String(runs),
+    overs: overs === null || overs === undefined ? "" : String(overs),
+    wickets: wickets === null || wickets === undefined ? "" : String(wickets),
+    extras: extras === null || extras === undefined ? "" : String(extras),
+    economy: economy === null || economy === undefined ? "" : String(economy),
+    isCurrent
+  };
+}
+
+function collectCricbuzzBowlers(objects, currentBowler, extraBowlers = []) {
+  const bowlers = [];
+  const addBowler = (bowler) => {
+    if (!bowler.name && !bowler.runs && !bowler.overs && !bowler.wickets) return;
+    const key = normalizeTeamKey(bowler.name || JSON.stringify(bowler));
+    const existing = bowlers.find((item) => normalizeTeamKey(item.name || JSON.stringify(item)) === key);
+    if (existing) {
+      if (bowler.isCurrent) existing.isCurrent = true;
+      Object.keys(bowler).forEach((field) => {
+        if ((existing[field] === "" || existing[field] === undefined) && bowler[field] !== "") existing[field] = bowler[field];
+      });
+      return;
+    }
+    bowlers.push(bowler);
+  };
+
+  addBowler(currentBowler);
+  extraBowlers.forEach(addBowler);
+
+  objects.forEach((obj) => {
+    if (!isPlainObject(obj)) return;
+    const hasBowlerName = obj.bowlName || obj.bowlerName || obj.bowler || obj.currentBowler;
+    const hasBowlingFigures = obj.bowlOvs !== undefined || obj.bowlRuns !== undefined || obj.bowlWkts !== undefined || obj.bowlEcon !== undefined;
+    if (!hasBowlerName || !hasBowlingFigures) return;
+    addBowler(parseCricbuzzBowler(obj, false));
+  });
+
+  return bowlers
+    .sort((a, b) => Number(b.isCurrent) - Number(a.isCurrent))
+    .slice(0, 2);
+}
+
+function normalizeTeamKey(value) {
+  return String(value || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
+function teamAcronym(value) {
+  const clean = String(value || "").trim();
+  if (/^[A-Z0-9]{2,5}$/.test(clean)) return clean;
+
+  return clean
+    .replace(/\([^)]*\)/g, "")
+    .split(/\s+/)
+    .map((word) => word.replace(/[^a-z0-9]/gi, ""))
+    .filter((word) => word && !/^(vs?|v|the|and)$/i.test(word))
+    .map((word) => word[0])
+    .join("")
+    .toUpperCase();
+}
+
+function teamNameParts(team, fallback = "") {
+  if (!isPlainObject(team)) return [team || fallback].filter(Boolean);
+  return [
+    team.shortName,
+    team.teamSName,
+    team.teamShortName,
+    team.teamAbbr,
+    team.abbr,
+    team.name,
+    team.teamName,
+    fallback
+  ].filter(Boolean);
+}
+
+function displayTeamName(team, fallback = "") {
+  if (isPlainObject(team)) return team.shortName || team.teamSName || team.teamShortName || team.name || team.teamName || fallback;
+  return team || fallback;
+}
+
+function teamMatches(value, team, fallback = "") {
+  const needle = normalizeTeamKey(value);
+  const names = teamNameParts(team, fallback)
+    .flatMap((name) => [name, teamAcronym(name)])
+    .map(normalizeTeamKey)
+    .filter(Boolean);
+  return names.some((name) => name === needle || name.includes(needle) || needle.includes(name));
+}
+
+function pairedTeamNames(battingName, team1Obj, team2Obj, fallbackTeams) {
+  const team1 = displayTeamName(team1Obj, fallbackTeams[0]);
+  const team2 = displayTeamName(team2Obj, fallbackTeams[1]);
+
+  if (teamMatches(battingName, team1Obj, fallbackTeams[0])) {
+    return { battingTeam: team1, bowlingTeam: team2 };
+  }
+
+  if (teamMatches(battingName, team2Obj, fallbackTeams[1])) {
+    return { battingTeam: team2, bowlingTeam: team1 };
+  }
+
+  return {
+    battingTeam: battingName || team1,
+    bowlingTeam: normalizeTeamKey(battingName) === normalizeTeamKey(team2) ? team1 : team2
+  };
+}
+
+function teamCandidatesFromObjects(objects, fallbackTeams) {
+  const candidates = [];
+
+  for (const obj of objects) {
+    if (!isPlainObject(obj)) continue;
+    const hasTeamName = obj.teamName || obj.teamSName || obj.teamShortName || obj.shortName || obj.name;
+    if (!hasTeamName) continue;
+
+    const display = displayTeamName(obj);
+    const key = normalizeTeamKey(display);
+    if (!key || candidates.some((team) => team.key === key)) continue;
+    candidates.push({ raw: obj, display, key });
+  }
+
+  fallbackTeams.forEach((team) => {
+    const display = displayTeamName(team);
+    const key = normalizeTeamKey(display);
+    if (key && !candidates.some((candidate) => candidate.key === key)) {
+      candidates.push({ raw: team, display, key });
+    }
+  });
+
+  return candidates;
+}
+
+function pairedTeamNamesFromCandidates(battingName, candidates, fallbackTeams) {
+  const batKey = normalizeTeamKey(battingName);
+  const matched = candidates.find((team) => {
+    const names = teamNameParts(team.raw, team.display).map(normalizeTeamKey).filter(Boolean);
+    return names.some((name) => name === batKey || name.includes(batKey) || batKey.includes(name));
+  });
+
+  if (matched) {
+    const other = candidates.find((team) => team.key !== matched.key);
+    return {
+      battingTeam: battingName || matched.display,
+      bowlingTeam: other?.display || ""
+    };
+  }
+
+  return pairedTeamNames(battingName, fallbackTeams[0], fallbackTeams[1], fallbackTeams);
+}
+
+function pairedTeamsFromSheetShorts(battingName, event, teams) {
+  const short1 = event?.team1Short || teamAcronym(teams[0]);
+  const short2 = event?.team2Short || teamAcronym(teams[1]);
+  if (!short1 || !short2 || !battingName) return null;
+
+  const batKey = normalizeTeamKey(battingName);
+  const team1Key = normalizeTeamKey(short1);
+  const team2Key = normalizeTeamKey(short2);
+
+  if (batKey === team1Key || batKey.includes(team1Key) || team1Key.includes(batKey)) {
+    return {
+      battingTeam: short1,
+      bowlingTeam: short2
+    };
+  }
+
+  if (batKey === team2Key || batKey.includes(team2Key) || team2Key.includes(batKey)) {
+    return {
+      battingTeam: short2,
+      bowlingTeam: short1
+    };
+  }
+
+  return null;
+}
+
+function readCricbuzzModel(data, objects, teams, selectedEvent) {
   const header = data?.matchHeader || findObjectWithKeys(objects, ["matchDescription", "team1", "team2"]);
   const miniscore = data?.miniscore || data?.miniScore || findObjectWithKeys(objects, ["matchScoreDetails", "batsmanStriker", "bowlerStriker"]);
   const scoreDetails = miniscore?.matchScoreDetails || data?.matchScoreDetails || {};
   const innings = scoreDetails?.inningsScoreList || miniscore?.inningsScoreList || data?.inningsScoreList || [];
   const inningsList = Array.isArray(innings) ? innings.filter(isPlainObject) : [];
   const activeInnings = inningsList[inningsList.length - 1] || {};
-  const team1 = header?.team1?.name || header?.team1?.teamName || header?.team1?.shortName || teams[0];
-  const team2 = header?.team2?.name || header?.team2?.teamName || header?.team2?.shortName || teams[1];
+  const team1Obj = header?.team1 || teams[0];
+  const team2Obj = header?.team2 || teams[1];
   const batTeamName =
+    firstScoreValue(objects, ["batTeamName"]) ||
+    data?.batTeamName ||
     miniscore?.batTeamName ||
     miniscore?.batTeam?.batTeamName ||
     scoreDetails?.batTeamName ||
     activeInnings.batTeamName ||
     activeInnings.teamName ||
     activeInnings.batTeamShortName ||
-    firstScoreValue(objects, ["batTeamName"]) ||
     "";
-  const battingTeam = batTeamName || (inningsList.length > 1 ? team2 : team1);
-  const bowlingTeam = battingTeam === team2 ? team1 : team2;
+  const teamCandidates = teamCandidatesFromObjects(objects, [team1Obj, team2Obj, ...teams]);
+  const pairedTeams = pairedTeamsFromSheetShorts(batTeamName, selectedEvent, teams) || pairedTeamNamesFromCandidates(batTeamName, teamCandidates, teams);
+  const battingTeam = batTeamName || pairedTeams.battingTeam;
+  let bowlingTeam = pairedTeams.bowlingTeam;
+  if (normalizeTeamKey(bowlingTeam) === normalizeTeamKey(battingTeam)) {
+    const short1 = selectedEvent?.team1Short || teamAcronym(teams[0]);
+    const short2 = selectedEvent?.team2Short || teamAcronym(teams[1]);
+    bowlingTeam = teamMatches(battingTeam, teams[0], short1) || normalizeTeamKey(battingTeam) === normalizeTeamKey(short1) ? short2 : short1;
+  }
   const striker = parseCricbuzzBatter(miniscore?.batsmanStriker || data?.batsmanStriker || miniscore?.striker, true);
   const nonStriker = parseCricbuzzBatter(miniscore?.batsmanNonStriker || data?.batsmanNonStriker || miniscore?.nonStriker, false);
   const bowler = miniscore?.bowlerStriker || miniscore?.currentBowler || {};
+  const currentBowler = parseCricbuzzBowler(bowler, true);
+  const previousBowler = parseCricbuzzBowler(miniscore?.bowlerNonStriker || data?.bowlerNonStriker || miniscore?.nonStrikerBowler, false);
+  const bowlers = collectCricbuzzBowlers(objects, currentBowler, [previousBowler]);
   const runs = activeInnings.score ?? activeInnings.runs ?? "";
   const wickets = activeInnings.wickets ?? activeInnings.wkts ?? "";
   const overs = activeInnings.overs ?? activeInnings.ovs ?? "";
@@ -627,11 +857,18 @@ function readCricbuzzModel(data, objects, teams) {
     striker: striker.name || "",
     strikerRuns: striker.runs || "",
     strikerBalls: striker.balls || "",
+    strikerFours: striker.fours || "",
+    strikerSixes: striker.sixes || "",
+    strikerStrikeRate: striker.strikeRate || "",
     nonStriker: nonStriker.name || "",
     nonStrikerRuns: nonStriker.runs || "",
     nonStrikerBalls: nonStriker.balls || "",
+    nonStrikerFours: nonStriker.fours || "",
+    nonStrikerSixes: nonStriker.sixes || "",
+    nonStrikerStrikeRate: nonStriker.strikeRate || "",
     bowler: bowler.bowlName || bowler.name || bowler.bowlerName || "",
-    bowlerFigures: formatCricbuzzBowlerFigures(bowler)
+    bowlerFigures: formatCricbuzzBowlerFigures(bowler),
+    bowlers
   };
 }
 
@@ -642,7 +879,7 @@ function readScoreModel(data) {
   const cricbuzzObjects = cricbuzzData ? flattenScoreObjects(cricbuzzData) : [];
   const selected = eventRows.find((event) => event.id === selectedEventId);
   const teams = splitEventTeams(selectedEventName || selected?.name || "");
-  const cricbuzz = cricbuzzData ? readCricbuzzModel(cricbuzzData, cricbuzzObjects, teams) : null;
+  const cricbuzz = cricbuzzData ? readCricbuzzModel(cricbuzzData, cricbuzzObjects, teams, selected) : null;
   const firstInningsRaw = firstScoreValue(objects, ["j"]);
   const secondInningsRaw = firstScoreValue(objects, ["k"]);
   const isSecondInnings = Boolean(firstInningsRaw && secondInningsRaw);
@@ -658,7 +895,8 @@ function readScoreModel(data) {
   const chaseMessage = isSecondInnings && !chaseComplete ? `${activeTeam || "Team 2"} need ${runsNeeded} runs in ${ballsRemaining} balls` : "";
   const statusCode = String(firstScoreValue(objects, ["b", "ball_status", "ballStatus", "status_code", "statusCode"]) || "").trim();
   const statusText = BALL_STATUS_MAP[statusCode.toLowerCase()] || statusCode || "Live";
-  const bowlerFigures = formatGoScorerBowlerFigures(firstScoreValue(objects, ["c"])) || firstScoreValue(objects, ["bowler_figures", "bowlerFigures", "figures", "bowl_fig"]) || "";
+  const goScorerBowlerRaw = firstScoreValue(objects, ["c"]);
+  const bowlerFigures = formatGoScorerBowlerFigures(goScorerBowlerRaw) || firstScoreValue(objects, ["bowler_figures", "bowlerFigures", "figures", "bowl_fig"]) || "";
   const overValues = scoreOverValues(objects, scoreData);
   const overLast1 = parsePastOver(scoreFieldValue(objects, scoreData, "n")) ? scoreFieldValue(objects, scoreData, "n") : overValues[2] || "";
   const overLast2 = parsePastOver(scoreFieldValue(objects, scoreData, "m")) ? scoreFieldValue(objects, scoreData, "m") : overValues[1] || "";
@@ -671,6 +909,21 @@ function readScoreModel(data) {
     : [];
   const firstBatter = orderedBatters[0] || {};
   const secondBatter = orderedBatters[1] || {};
+  const bowlerName = cricbuzz?.bowler || firstScoreValue(objects, ["bowler", "current_bowler", "currentBowler", "blw"]) || "";
+  const goScorerBowler = parseGoScorerBowler(goScorerBowlerRaw, bowlerName);
+  const cricbuzzBowlers = Array.isArray(cricbuzz?.bowlers) ? cricbuzz.bowlers : [];
+  const bowlers = cricbuzzBowlers.length ? cricbuzzBowlers.map((bowler, index) => {
+    if (index !== 0) return bowler;
+    return {
+      ...bowler,
+      runs: goScorerBowler.runs || bowler.runs,
+      overs: goScorerBowler.overs || bowler.overs,
+      wickets: goScorerBowler.wickets || bowler.wickets,
+      extras: goScorerBowler.extras || bowler.extras,
+      economy: goScorerBowler.economy || bowler.economy,
+      isCurrent: true
+    };
+  }) : (goScorerBowler.name || goScorerBowler.runs ? [goScorerBowler] : []);
 
   return {
     title: cricbuzz?.title || firstScoreValue(objects, ["title", "match_title", "matchTitle", "match", "name"]) || selectedEventName || "Live Match",
@@ -681,7 +934,7 @@ function readScoreModel(data) {
     overs: activeInnings.overs || firstScoreValue(objects, ["overs", "over", "ov"]),
     crr: chaseComplete ? "" : (isSecondInnings ? activeInnings.crr : firstScoreValue(objects, ["crr", "current_run_rate", "currentRunRate", "rr", "runrate"]) || activeInnings.crr),
     rrr: chaseComplete ? "" : rrr,
-    completedTeam: chaseComplete ? (fieldingTeam || "Team 1") : "",
+    completedTeam: chaseComplete ? (cricbuzz?.bowlingTeam || fieldingTeam || "Team 1") : "",
     completedScore: chaseComplete ? firstInnings.runs : "",
     completedWickets: chaseComplete ? firstInnings.wickets : "",
     completedOvers: chaseComplete ? firstInnings.overs : "",
@@ -689,11 +942,18 @@ function readScoreModel(data) {
     striker: cricbuzz?.striker || firstBatter.name || firstScoreValue(objects, ["striker", "batsman1", "batsman", "bat1", "p1"]) || "",
     strikerRuns: firstBatter.runs || firstScoreValue(objects, ["striker_runs", "batsman1_runs", "bat1_runs", "r1"]) || "",
     strikerBalls: firstBatter.balls || firstScoreValue(objects, ["striker_balls", "batsman1_balls", "bat1_balls", "b1"]) || "",
+    strikerFours: cricbuzz?.strikerFours || firstScoreValue(objects, ["striker_fours", "striker4s", "batsman1_fours", "bat1_fours", "fours1"]) || "",
+    strikerSixes: cricbuzz?.strikerSixes || firstScoreValue(objects, ["striker_sixes", "striker6s", "batsman1_sixes", "bat1_sixes", "sixes1"]) || "",
+    strikerStrikeRate: cricbuzz?.strikerStrikeRate || firstScoreValue(objects, ["striker_sr", "strikerStrikeRate", "batsman1_sr", "bat1_sr", "sr1"]) || "",
     nonStriker: cricbuzz?.nonStriker || secondBatter.name || firstScoreValue(objects, ["non_striker", "nonStriker", "batsman2", "bat2", "p2"]) || "",
     nonStrikerRuns: secondBatter.runs || firstScoreValue(objects, ["non_striker_runs", "batsman2_runs", "bat2_runs", "r2"]) || "",
     nonStrikerBalls: secondBatter.balls || firstScoreValue(objects, ["non_striker_balls", "batsman2_balls", "bat2_balls", "b2"]) || "",
-    bowler: cricbuzz?.bowler || firstScoreValue(objects, ["bowler", "current_bowler", "currentBowler", "blw"]) || "",
+    nonStrikerFours: cricbuzz?.nonStrikerFours || firstScoreValue(objects, ["non_striker_fours", "nonStriker4s", "batsman2_fours", "bat2_fours", "fours2"]) || "",
+    nonStrikerSixes: cricbuzz?.nonStrikerSixes || firstScoreValue(objects, ["non_striker_sixes", "nonStriker6s", "batsman2_sixes", "bat2_sixes", "sixes2"]) || "",
+    nonStrikerStrikeRate: cricbuzz?.nonStrikerStrikeRate || firstScoreValue(objects, ["non_striker_sr", "nonStrikerStrikeRate", "batsman2_sr", "bat2_sr", "sr2"]) || "",
+    bowler: bowlerName,
     bowlerFigures,
+    bowlers,
     statusCode,
     statusText,
     overBalls: firstScoreValue(objects, ["A", "balls", "this_over", "thisOver", "last_over", "lastOver", "recentBalls"]) || "",
@@ -753,13 +1013,27 @@ function ballsToOvers(value) {
   return `${overs}.${balls}`;
 }
 
-function formatGoScorerBowlerFigures(value) {
+function parseGoScorerBowler(value, name = "") {
   const parts = String(value || "").split(".").map((part) => part.trim());
-  if (parts.length < 3 || parts.some((part) => part === "")) return "";
+  if (parts.length < 3 || parts.some((part, index) => index < 3 && part === "")) return {};
 
-  const [runs, balls, wickets] = parts;
+  const [runs, balls, wickets, extras = ""] = parts;
   const overs = ballsToOvers(balls);
-  return `${simpleValue(wickets)}-${simpleValue(runs)}${overs ? ` (${overs})` : ""}`;
+  return {
+    name,
+    runs,
+    overs,
+    wickets,
+    extras,
+    economy: economyValue(runs, balls),
+    isCurrent: true
+  };
+}
+
+function formatGoScorerBowlerFigures(value) {
+  const bowler = parseGoScorerBowler(value);
+  if (!bowler.runs && !bowler.wickets) return "";
+  return `${simpleValue(bowler.wickets)}-${simpleValue(bowler.runs)}${bowler.overs ? ` (${bowler.overs})` : ""}`;
 }
 
 function parseBatterField(value, fallbackName = "Batter") {
@@ -807,6 +1081,122 @@ function formatPlayerLine(name, runs, balls) {
   const nameMarkup = `${simpleValue(cleanName)}${isStriker ? ' <span class="bat-icon" title="On strike">🏏</span>' : ""}`;
   const score = runs || balls ? ` ${simpleValue(runs)} (${simpleValue(balls)})` : "";
   return `${nameMarkup}${score}`;
+}
+
+function strikeRateValue(runs, balls, fallback = "") {
+  if (fallback) {
+    const fallbackValue = Number(fallback);
+    return Number.isFinite(fallbackValue) ? String(Math.round(fallbackValue)) : simpleValue(fallback);
+  }
+  const runValue = Number(runs);
+  const ballValue = Number(balls);
+  if (!Number.isFinite(runValue) || !Number.isFinite(ballValue) || ballValue <= 0) return "-";
+  return String(Math.round((runValue / ballValue) * 100));
+}
+
+function batterNameMarkup(name) {
+  if (!name) return "-";
+  const isStriker = String(name).includes("*");
+  const cleanName = String(name).replace(/\*/g, "").trim();
+  return `${simpleValue(cleanName)}${isStriker ? ' <span class="bat-icon" title="On strike">🏏</span>' : ""}`;
+}
+
+function createBatterGrid(model) {
+  const rows = [
+    {
+      name: model.striker,
+      runs: model.strikerRuns,
+      balls: model.strikerBalls,
+      fours: model.strikerFours,
+      sixes: model.strikerSixes,
+      strikeRate: model.strikerStrikeRate
+    },
+    {
+      name: model.nonStriker,
+      runs: model.nonStrikerRuns,
+      balls: model.nonStrikerBalls,
+      fours: model.nonStrikerFours,
+      sixes: model.nonStrikerSixes,
+      strikeRate: model.nonStrikerStrikeRate
+    }
+  ].filter((row) => row.name || row.runs || row.balls);
+
+  if (rows.length === 0) {
+    return '<div class="scorecard-grid batter-grid scorecard-grid-empty">Batsman data unavailable</div>';
+  }
+
+  return `
+    <div class="scorecard-grid batter-grid" role="table" aria-label="Batsman scorecard">
+      <div class="scorecard-grid-row batter-grid-row scorecard-grid-head" role="row">
+        <span role="columnheader">Batsman</span>
+        <span role="columnheader">Run</span>
+        <span role="columnheader">Ball</span>
+        <span role="columnheader">4s</span>
+        <span role="columnheader">6s</span>
+        <span role="columnheader">SR</span>
+      </div>
+      ${rows.map((row) => `
+        <div class="scorecard-grid-row batter-grid-row" role="row">
+          <span class="batter-name-cell" role="cell">${batterNameMarkup(row.name)}</span>
+          <span role="cell">${simpleValue(row.runs)}</span>
+          <span role="cell">${simpleValue(row.balls)}</span>
+          <span role="cell">${simpleValue(row.fours)}</span>
+          <span role="cell">${simpleValue(row.sixes)}</span>
+          <span role="cell">${strikeRateValue(row.runs, row.balls, row.strikeRate)}</span>
+        </div>
+      `).join("")}
+    </div>
+  `;
+}
+
+function bowlerNameMarkup(name, isCurrent = false) {
+  if (!name) return "-";
+  return `${simpleValue(name)}${isCurrent ? ' <span class="ball-icon" title="Currently bowling"></span>' : ""}`;
+}
+
+function createBowlerGrid(model) {
+  const rows = (Array.isArray(model.bowlers) ? model.bowlers : [])
+    .filter((row) => row.name || row.runs || row.overs || row.wickets)
+    .slice(0, 2);
+
+  if (rows.length === 0 && (model.bowler || model.bowlerFigures)) {
+    rows.push({
+      name: model.bowler,
+      runs: "",
+      overs: "",
+      wickets: "",
+      extras: "",
+      economy: "",
+      isCurrent: true
+    });
+  }
+
+  if (rows.length === 0) {
+    return '<div class="scorecard-grid bowler-grid scorecard-grid-empty">Bowler data unavailable</div>';
+  }
+
+  return `
+    <div class="scorecard-grid bowler-grid" role="table" aria-label="Bowler scorecard">
+      <div class="scorecard-grid-row bowler-grid-row scorecard-grid-head" role="row">
+        <span role="columnheader">Bowler</span>
+        <span role="columnheader">Run</span>
+        <span role="columnheader">Over</span>
+        <span role="columnheader">Wicket</span>
+        <span role="columnheader">Extras</span>
+        <span role="columnheader">Economy</span>
+      </div>
+      ${rows.map((row) => `
+        <div class="scorecard-grid-row bowler-grid-row" role="row">
+          <span class="bowler-name-cell" role="cell">${bowlerNameMarkup(row.name, row.isCurrent)}</span>
+          <span role="cell">${simpleValue(row.runs)}</span>
+          <span role="cell">${simpleValue(row.overs)}</span>
+          <span role="cell">${simpleValue(row.wickets)}</span>
+          <span role="cell">${simpleValue(row.extras)}</span>
+          <span role="cell">${economyValue(row.runs, row.overs, row.economy)}</span>
+        </div>
+      `).join("")}
+    </div>
+  `;
 }
 
 function tokenizeBallEvents(value) {
@@ -927,7 +1317,13 @@ function createBallPill(ball) {
   const classes = ["ball-pill"];
   let display = ball;
 
-  if (/w|\^1|\^2|\^3/i.test(ball)) {
+  if (normalized === "wd" || normalized === "wide") {
+    classes.push("wide");
+    display = "WD";
+  } else if (normalized === "nb" || normalized === "noball") {
+    classes.push("wide");
+    display = "NB";
+  } else if (/^w$|\^1|\^2|\^3/i.test(String(ball))) {
     classes.push("wicket");
     display = "W";
   } else if (normalized === "6" || normalized === "six") {
@@ -936,12 +1332,6 @@ function createBallPill(ball) {
   } else if (normalized === "4" || normalized === "four") {
     classes.push("four");
     display = "4";
-  } else if (normalized === "wd" || normalized === "wide") {
-    classes.push("wide");
-    display = "WD";
-  } else if (normalized === "nb" || normalized === "noball") {
-    classes.push("wide");
-    display = "NB";
   }
 
   pill.className = classes.join(" ");
@@ -972,6 +1362,7 @@ function createBallPills(value) {
 function createLiveScoreSection() {
   const section = document.createElement("section");
   section.className = "live-score-section cricket-score";
+  if (liveScoreCompact) section.classList.add("score-compact");
 
   if (liveScoreState.error) {
     section.innerHTML = `<div class="score-title">Live Score</div><div class="live-score-error">${liveScoreState.error}</div>`;
@@ -985,8 +1376,22 @@ function createLiveScoreSection() {
 
   const model = readScoreModel(liveScoreState.data);
   window.__fair91LastScoreModel = model;
+  window.__fair91TeamDebug = () => ({
+    selectedEventId,
+    selectedEventName,
+    event: eventRows.find((event) => event.id === selectedEventId),
+    battingTeam: model.battingTeam,
+    bowlingTeam: model.bowlingTeam,
+    completedTeam: model.completedTeam,
+    cricbuzz: liveScoreState.data?.cricbuzzData || null
+  });
   section.innerHTML = `
-    <div class="score-title">${simpleValue(model.title)}</div>
+    <div class="score-title">
+      <span>${simpleValue(model.title)}</span>
+      <button type="button" class="score-toggle" aria-pressed="${liveScoreCompact ? "true" : "false"}">
+        ${liveScoreCompact ? "Full" : "Compact"}
+      </button>
+    </div>
     <div class="score-hero">
       <div class="team-score">
         <span class="team-name">${simpleValue(model.battingTeam)}</span>
@@ -1012,15 +1417,11 @@ function createLiveScoreSection() {
       `}
     </div>
     <div class="score-live-grid">
-      <div class="score-player-card">
-        <span>Batsmen</span>
-        <strong>${formatPlayerLine(model.striker, model.strikerRuns, model.strikerBalls)}</strong>
-        <strong>${formatPlayerLine(model.nonStriker, model.nonStrikerRuns, model.nonStrikerBalls)}</strong>
+      <div class="score-player-card batter-card">
+        ${createBatterGrid(model)}
       </div>
-      <div class="score-player-card">
-        <span>Bowler</span>
-        <strong>${simpleValue(model.bowler)}</strong>
-        <strong>${simpleValue(model.bowlerFigures)}</strong>
+      <div class="score-player-card bowler-card">
+        ${createBowlerGrid(model)}
       </div>
       <div class="score-player-card">
         <span>${simpleValue(model.projectedLabel || "Projected Score")}</span>
@@ -1029,14 +1430,28 @@ function createLiveScoreSection() {
     </div>
   `;
 
+  section.querySelector(".score-toggle")?.addEventListener("click", () => {
+    liveScoreCompact = !liveScoreCompact;
+    renderCurrentData();
+  });
+
   const overStrip = createOverStrip(model);
   if (overStrip.childElementCount) {
     section.querySelector(".score-hero").after(overStrip);
     const signature = JSON.stringify(model.overHistory || {});
+    overStrip.addEventListener("scroll", () => {
+      overStripScrollLeft = overStrip.scrollLeft;
+    }, { passive: true });
+
     if (signature !== lastOverStripSignature) {
       lastOverStripSignature = signature;
       requestAnimationFrame(() => {
         overStrip.scrollLeft = overStrip.scrollWidth;
+        overStripScrollLeft = overStrip.scrollLeft;
+      });
+    } else if (overStripScrollLeft !== null) {
+      requestAnimationFrame(() => {
+        overStrip.scrollLeft = overStripScrollLeft;
       });
     }
   }

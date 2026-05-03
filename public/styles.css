@@ -65,6 +65,11 @@ input {
   display: flex;
   gap: 10px;
   overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.event-tabs::-webkit-scrollbar {
+  display: none;
 }
 
 .event-tab {
@@ -119,9 +124,32 @@ input {
 }
 
 .score-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
   padding: 16px 28px;
   color: #bdd0df;
   border-bottom: 1px solid #23303d;
+}
+
+.score-title span {
+  min-width: 0;
+}
+
+.score-toggle {
+  flex: 0 0 auto;
+  border: 1px solid #d8b86b;
+  border-radius: 6px;
+  padding: 7px 11px;
+  background: #1a2632;
+  color: #f5d271;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.score-toggle:hover {
+  background: #233342;
 }
 
 .score-hero {
@@ -190,9 +218,21 @@ input {
   justify-content: flex-end;
 }
 
+.score-compact .score-hero {
+  grid-template-columns: minmax(0, 1fr) minmax(160px, 0.55fr);
+  min-height: 92px;
+}
+
+.score-compact .score-meta,
+.score-compact .score-meta-team,
+.score-compact .score-live-grid,
+.score-compact .over-strip {
+  display: none;
+}
+
 .score-live-grid {
   display: grid;
-  grid-template-columns: 1.2fr 1fr 1fr;
+  grid-template-columns: minmax(420px, 1fr) minmax(420px, 1fr) minmax(170px, 0.42fr);
   gap: 0;
   padding: 26px 28px 18px;
 }
@@ -228,6 +268,93 @@ input {
   font-size: 0.95em;
   line-height: 1;
   vertical-align: -0.08em;
+}
+
+.batter-card {
+  padding-top: 0;
+  padding-bottom: 0;
+}
+
+.scorecard-grid {
+  display: grid;
+  width: 100%;
+  min-width: 0;
+  border: 1px solid #263747;
+  border-radius: 8px;
+  overflow: hidden;
+  background: #101a25;
+}
+
+.scorecard-grid-row {
+  display: grid;
+  grid-template-columns: minmax(160px, 1fr) repeat(5, minmax(44px, 0.36fr));
+  align-items: center;
+  min-height: 40px;
+  border-top: 1px solid #23303d;
+}
+
+.scorecard-grid-row:first-child {
+  border-top: 0;
+}
+
+.scorecard-grid-head {
+  min-height: 34px;
+  color: #f5d271;
+  background: #172432;
+  font-size: 0.76rem;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.score-player-card .scorecard-grid span {
+  display: block;
+  margin: 0;
+  padding: 8px 10px;
+  color: #e7f0f8;
+  text-align: center;
+  border-left: 1px solid #23303d;
+}
+
+.score-player-card .scorecard-grid span:first-child {
+  border-left: 0;
+}
+
+.score-player-card .scorecard-grid-head span {
+  color: #f5d271;
+}
+
+.score-player-card .scorecard-grid .batter-name-cell,
+.score-player-card .scorecard-grid .bowler-name-cell {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 6px;
+  text-align: left;
+  font-weight: 800;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.score-player-card .scorecard-grid .batter-name-cell .bat-icon,
+.score-player-card .scorecard-grid .bowler-name-cell .ball-icon {
+  flex: 0 0 auto;
+  margin-left: 2px;
+}
+
+.score-player-card .scorecard-grid .bowler-name-cell .ball-icon {
+  width: 9px;
+  height: 9px;
+  border-radius: 999px;
+  background: #e94b5d;
+  box-shadow: 0 0 0 3px rgba(233, 75, 93, 0.18);
+}
+
+.score-player-card .scorecard-grid-empty {
+  display: grid;
+  min-height: 82px;
+  place-items: center;
+  color: #8fa0ae;
 }
 
 .score-over-card {
@@ -658,8 +785,26 @@ pre {
     justify-items: start;
   }
 
+  .score-compact .score-hero {
+    grid-template-columns: minmax(0, 1fr) minmax(160px, 45vw);
+  }
+
   .score-live-grid {
     grid-template-columns: 1fr;
+  }
+
+  .scorecard-grid {
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+
+  .scorecard-grid::-webkit-scrollbar {
+    display: none;
+  }
+
+  .scorecard-grid-row {
+    grid-template-columns: minmax(150px, 1fr) repeat(5, 52px);
+    min-width: 410px;
   }
 
   .score-player-card {
@@ -696,6 +841,27 @@ pre {
   .over-strip {
     padding-left: 14px;
     padding-right: 14px;
+  }
+
+  .score-title {
+    align-items: flex-start;
+  }
+
+  .score-toggle {
+    padding: 6px 9px;
+    font-size: 0.76rem;
+  }
+
+  .score-hero {
+    grid-template-columns: minmax(0, 1fr) minmax(118px, 38vw);
+  }
+
+  .score-meta-team {
+    display: none;
+  }
+
+  .score-compact .score-hero {
+    grid-template-columns: minmax(0, 1fr) minmax(118px, 38vw);
   }
 
   .score-over-card {
