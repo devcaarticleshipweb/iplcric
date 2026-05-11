@@ -41,7 +41,11 @@ input {
 }
 
 .board-title-wrap {
+  position: relative;
+  min-height: 46px;
   margin: 0 0 10px;
+  display: grid;
+  align-items: center;
 }
 
 .board-title {
@@ -50,6 +54,55 @@ input {
   font-size: clamp(1.2rem, 2.2vw, 1.9rem);
   letter-spacing: 0.03em;
   color: #f5deb0;
+}
+
+.hidden {
+  display: none !important;
+}
+
+.account-bar {
+  position: absolute;
+  right: 0;
+  top: 50%;
+  transform: translateY(-50%);
+  display: flex;
+  align-items: stretch;
+  gap: 8px;
+  max-width: min(620px, 58vw);
+}
+
+.account-stat {
+  min-width: 92px;
+  padding: 7px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(24, 27, 34, 0.9);
+}
+
+.account-stat span {
+  display: block;
+  color: var(--muted);
+  font-size: 0.66rem;
+  text-transform: uppercase;
+}
+
+.account-stat strong {
+  display: block;
+  margin-top: 2px;
+  color: #f2f3f7;
+  font-size: 0.84rem;
+  white-space: nowrap;
+}
+
+.bet-slip-btn {
+  border: 0;
+  border-radius: 8px;
+  padding: 0 14px;
+  background: linear-gradient(130deg, #e4c57f, var(--gold));
+  color: #151515;
+  font-weight: 900;
+  cursor: pointer;
+  white-space: nowrap;
 }
 
 .event-tabs-wrap {
@@ -959,6 +1012,64 @@ pre {
   cursor: pointer;
 }
 
+.bet-slip-modal-layer {
+  position: fixed;
+  inset: 0;
+  z-index: 210;
+  display: grid;
+  place-items: center;
+  padding: 18px;
+  background: rgba(3, 5, 10, 0.76);
+  backdrop-filter: blur(7px);
+}
+
+.bet-slip-modal {
+  width: min(1040px, 100%);
+  max-height: min(780px, calc(100vh - 36px));
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: #111821;
+  box-shadow: var(--shadow);
+}
+
+.bet-slip-modal-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--line);
+}
+
+.bet-slip-modal-head span {
+  display: block;
+  color: var(--muted);
+  font-size: 0.76rem;
+  text-transform: uppercase;
+}
+
+.bet-slip-close {
+  width: 34px;
+  height: 34px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #202b38;
+  color: var(--text);
+  font-size: 1.3rem;
+  cursor: pointer;
+}
+
+.bet-slip-modal-body {
+  max-height: calc(min(780px, 100vh - 36px) - 64px);
+  overflow: auto;
+}
+
+.bet-slip-modal .betting-panel {
+  border: 0;
+  border-radius: 0;
+}
+
 .ladder-modal-layer {
   position: fixed;
   inset: 0;
@@ -1040,6 +1151,28 @@ pre {
 }
 
 @media (max-width: 900px) {
+  .board-title-wrap {
+    min-height: 0;
+    gap: 10px;
+  }
+
+  .account-bar {
+    position: static;
+    transform: none;
+    justify-content: flex-end;
+    max-width: none;
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+
+  .account-bar::-webkit-scrollbar {
+    display: none;
+  }
+
+  .account-stat {
+    min-width: 86px;
+  }
+
   .betting-head {
     grid-template-columns: 1fr 1fr;
   }

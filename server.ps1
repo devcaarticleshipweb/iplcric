@@ -661,11 +661,13 @@ function Handle-Api {
   }
 
   $CleanId = $Id.Trim()
-  $UpstreamUrl = $Endpoint + "?id=" + [System.Uri]::EscapeDataString($CleanId)
+  $UpstreamUrl = $Endpoint + "?id=" + [System.Uri]::EscapeDataString($CleanId) + "&_=" + [System.Uri]::EscapeDataString(([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds().ToString()))
 
   try {
     $ApiResponse = Invoke-RestMethod -Uri $UpstreamUrl -Method Get -TimeoutSec 12 -Headers @{
       Accept = "application/json, text/plain, */*"
+      "Cache-Control" = "no-cache"
+      Pragma = "no-cache"
       "User-Agent" = "Fair91OddsViewer/1.0"
     }
 

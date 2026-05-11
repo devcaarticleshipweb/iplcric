@@ -8,13 +8,26 @@ const loginForm = document.querySelector("#login-form");
 const loginUser = document.querySelector("#login-user");
 const loginPass = document.querySelector("#login-pass");
 const loginError = document.querySelector("#login-error");
+const accountBar = document.querySelector("#account-bar");
 
 const REFRESH_INTERVAL_MS = 1000;
+const LIVE_SCORE_REFRESH_INTERVAL_MS = 3000;
+const ENABLE_BACKGROUND_SHEETS_SYNC = false;
 const SESSION_KEY = "fair91.auth";
 const SELECTED_EVENT_KEY = "fair91.selectedEventId";
 
 let refreshTimer = null;
+let liveScoreRefreshTimer = null;
+let ledgerRefreshTimer = null;
+let rowStatsSyncTimer = null;
 let isFetching = false;
+let oddsRequestSeq = 0;
+let latestRenderedOddsSeq = 0;
+let activeOddsRequests = 0;
+let isLiveScoreFetching = false;
+let isLedgerFetching = false;
+let ledgerFetchPromise = null;
+let isRowStatsSyncing = false;
 let hasRenderedData = false;
 let selectedEventId = "";
 let selectedEventName = "";
@@ -35,6 +48,7 @@ let bettingLedger = {
   bets: [],
   summary: []
 };
+let pendingStatsRows = [];
 
 function setStatus(message, meta = "") {
   statusText.textContent = message;
@@ -219,17 +233,17 @@ function validateLogin(username, password) {
 }
 
 async function authenticateLogin(username, password) {
+  if (ledgerFetchPromise) {
+    await Promise.race([
+      ledgerFetchPromise,
+      new Promise((resolve) => window.setTimeout(resolve, 700))
+    ]);
+  }
+
   const sheetUser = validateLogin(username, password);
   if (sheetUser) return sheetUser;
 
-  const response = await fetch("/api/betting-auth", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ username, password })
-  });
-  const payload = await response.json();
-  if (!response.ok) return null;
-  return payload.user;
+  return null;
 }
 
 function currentSession() {
@@ -246,15 +260,28 @@ function displayMoney(value) {
   return number.toLocaleString("en-IN", { maximumFractionDigits: 2 });
 }
 
-async function fetchBettingLedger() {
-  try {
-    const response = await fetch("/api/betting-ledger");
-    const payload = await response.json();
-    if (!response.ok) throw new Error(payload.detail || payload.error || "Unable to load betting ledger.");
-    bettingLedger = payload;
-  } catch (error) {
-    console.warn("Unable to load betting ledger", error);
-  }
+async function fetchBettingLedger({ force = false } = {}) {
+  if (isLedgerFetching && ledgerFetchPromise && !force) return ledgerFetchPromise;
+  isLedgerFetching = true;
+
+  ledgerFetchPromise = (async () => {
+    try {
+      const ledgerUrl = force ? `/api/betting-ledger?_=${Date.now()}` : "/api/betting-ledger";
+      const response = await fetch(ledgerUrl, { cache: "no-store" });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.detail || payload.error || "Unable to load betting ledger.");
+      bettingLedger = payload;
+      return payload;
+    } catch (error) {
+      console.warn("Unable to load betting ledger", error);
+      return bettingLedger;
+    } finally {
+      isLedgerFetching = false;
+      ledgerFetchPromise = null;
+    }
+  })();
+
+  return ledgerFetchPromise;
 }
 
 function renderTabs() {
@@ -361,32 +388,58 @@ function updateSeenRange(key, backPrice, layPrice) {
 }
 
 async function syncSeenRanges(rows) {
-  if (!selectedEventId) return;
+  if (!selectedEventId || isRowStatsSyncing || rows.length === 0) return;
+  isRowStatsSyncing = true;
 
-  const response = await fetch("/api/row-stats", {
-    method: "POST",
-    headers: {
-      "content-type": "application/json"
-    },
-    body: JSON.stringify({
-      eventId: selectedEventId,
-      rows: rows.map((row) => ({
-        key: row.key,
-        backPrice: row.backPrice,
-        layPrice: row.layPrice
-      }))
-    })
-  });
-
-  const payload = await response.json();
-  if (!response.ok) throw new Error(payload.detail || payload.error || "Unable to update row stats.");
-
-  Object.entries(payload.stats || {}).forEach(([key, stats]) => {
-    rowStats.set(makeStatsKey(selectedEventId, key), {
-      min: stats?.min ?? null,
-      max: stats?.max ?? null
+  try {
+    const response = await fetch("/api/row-stats", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json"
+      },
+      body: JSON.stringify({
+        eventId: selectedEventId,
+        rows: rows.map((row) => ({
+          key: row.key,
+          backPrice: row.backPrice,
+          layPrice: row.layPrice
+        }))
+      })
     });
-  });
+
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.detail || payload.error || "Unable to update row stats.");
+
+    Object.entries(payload.stats || {}).forEach(([key, stats]) => {
+      rowStats.set(makeStatsKey(selectedEventId, key), {
+        min: stats?.min ?? null,
+        max: stats?.max ?? null
+      });
+    });
+    if (window.__fair91LastPayload) renderCurrentData();
+  } finally {
+    isRowStatsSyncing = false;
+  }
+}
+
+function queueSeenRangeSync(rows) {
+  pendingStatsRows = rows.map((row) => ({
+    key: row.key,
+    backPrice: row.backPrice,
+    layPrice: row.layPrice
+  }));
+}
+
+async function flushSeenRangeSync() {
+  if (pendingStatsRows.length === 0) return;
+  const rows = pendingStatsRows;
+  pendingStatsRows = [];
+  try {
+    await syncSeenRanges(rows);
+  } catch (error) {
+    console.warn("Unable to sync row stats", error);
+    pendingStatsRows = rows;
+  }
 }
 
 function createSummary(payload, total) {
@@ -401,6 +454,8 @@ function createSummary(payload, total) {
 }
 
 async function fetchLiveScore() {
+  if (isLiveScoreFetching) return;
+  isLiveScoreFetching = true;
   try {
     const selected = eventRows.find((event) => event.id === selectedEventId);
     const scoreKey = selected?.scoreKey || "";
@@ -435,6 +490,8 @@ async function fetchLiveScore() {
       error: error.message,
       fetchedAt: new Date().toISOString()
     };
+  } finally {
+    isLiveScoreFetching = false;
   }
 }
 
@@ -1610,7 +1667,7 @@ async function placeBet(rowData, side, odds, rate = "") {
   }
 
   try {
-    const latestResponse = await fetch(`/api/event-fancy?id=${encodeURIComponent(selectedEventId)}`);
+    const latestResponse = await fetch(`/api/event-fancy?id=${encodeURIComponent(selectedEventId)}&_=${Date.now()}`, { cache: "no-store" });
     const latestPayload = await latestResponse.json();
     if (!latestResponse.ok) throw new Error(latestPayload.detail || latestPayload.error || "Unable to verify latest odds.");
 
@@ -1919,6 +1976,78 @@ function userLedgerRecord(username) {
   return (bettingLedger.users || []).find((row) => String(row.username).toLowerCase() === String(username).toLowerCase()) || {};
 }
 
+function accountMetrics() {
+  const session = currentSession();
+  if (!session) return null;
+  const summary = userSummary(session.username);
+  const ledgerUser = userLedgerRecord(session.username);
+  return {
+    username: session.username,
+    balance: ledgerUser.balance ?? summary.balance ?? 0,
+    exposure: summary.exposure ?? 0
+  };
+}
+
+function renderAccountBar() {
+  if (!accountBar) return;
+  const metrics = accountMetrics();
+  if (!metrics) {
+    accountBar.classList.add("hidden");
+    accountBar.replaceChildren();
+    return;
+  }
+
+  accountBar.classList.remove("hidden");
+  accountBar.innerHTML = `
+    <div class="account-stat">
+      <span>User</span>
+      <strong>${simpleValue(metrics.username)}</strong>
+    </div>
+    <div class="account-stat">
+      <span>Balance</span>
+      <strong>${displayMoney(metrics.balance)}</strong>
+    </div>
+    <div class="account-stat">
+      <span>Exposure</span>
+      <strong>${displayMoney(metrics.exposure)}</strong>
+    </div>
+    <button type="button" class="bet-slip-btn">Bet Slip</button>
+  `;
+  accountBar.querySelector(".bet-slip-btn")?.addEventListener("click", showBetSlipModal);
+}
+
+function showBetSlipModal() {
+  const existing = document.querySelector(".bet-slip-modal-layer");
+  if (existing) existing.remove();
+
+  const layer = document.createElement("div");
+  layer.className = "bet-slip-modal-layer";
+  layer.innerHTML = `
+    <div class="bet-slip-modal" role="dialog" aria-modal="true">
+      <div class="bet-slip-modal-head">
+        <div>
+          <span>Account</span>
+          <strong>Bet Slip</strong>
+        </div>
+        <button type="button" class="bet-slip-close">×</button>
+      </div>
+      <div class="bet-slip-modal-body"></div>
+    </div>
+  `;
+  layer.querySelector(".bet-slip-modal-body").append(createBettingPanel());
+  layer.querySelector(".bet-slip-close").addEventListener("click", () => layer.remove());
+  layer.addEventListener("click", (event) => {
+    if (event.target === layer) layer.remove();
+  });
+  document.body.append(layer);
+}
+
+function refreshOpenBetSlipModal() {
+  const body = document.querySelector(".bet-slip-modal-body");
+  if (!body) return;
+  body.replaceChildren(createBettingPanel());
+}
+
 function createBettingPanel() {
   const session = currentSession();
   const section = document.createElement("section");
@@ -2024,7 +2153,7 @@ function renderPayload(payload, preparedRows = null) {
   const fancyRows = rows.filter((row) => row.marketType === "FANCY");
 
   const fragment = document.createDocumentFragment();
-  fragment.append(createBettingPanel());
+  renderAccountBar();
   fragment.append(createLiveScoreSection());
 
   if (bookmakerRows.length) fragment.append(createMarketSection("Bookmaker", ["Bookmaker", "Back", "Lay"], bookmakerRows, false));
@@ -2037,7 +2166,6 @@ function renderPayload(payload, preparedRows = null) {
   }
 
   fragment.append(createSummary(payload, rows.length));
-  fragment.append(createRawPanel(payload.data));
   content.replaceChildren(fragment);
   hasRenderedData = true;
 
@@ -2047,6 +2175,8 @@ function renderPayload(payload, preparedRows = null) {
 }
 
 function renderCurrentData() {
+  renderAccountBar();
+  refreshOpenBetSlipModal();
   if (window.__fair91LastPayload) {
     renderPayload(window.__fair91LastPayload, window.__fair91LastRows || null);
   }
@@ -2060,32 +2190,30 @@ function renderError(message, detail = "") {
 }
 
 async function fetchSelectedEvent({ manual = false } = {}) {
-  if (!selectedEventId || isFetching) return;
+  if (!selectedEventId) return;
+  if (activeOddsRequests >= 8) return;
 
   isFetching = true;
+  activeOddsRequests += 1;
+  const requestSeq = ++oddsRequestSeq;
   setStatus(manual ? "Fetching odds..." : "Auto-refreshing...", selectedEventName || selectedEventId);
 
   try {
-    const [oddsResult] = await Promise.all([
-      fetch(`/api/event-fancy?id=${encodeURIComponent(selectedEventId)}`),
-      fetchLiveScore(),
-      fetchBettingLedger()
-    ]);
+    const oddsResult = await fetch(`/api/event-fancy?id=${encodeURIComponent(selectedEventId)}&_=${Date.now()}`, { cache: "no-store" });
     const payload = await oddsResult.json();
     if (!oddsResult.ok) throw new Error(payload.detail || payload.error || "Request failed.");
+    if (requestSeq < latestRenderedOddsSeq) return;
+    latestRenderedOddsSeq = requestSeq;
     const rows = buildOddsRows(payload.data);
-    try {
-      await syncSeenRanges(rows);
-    } catch (statsError) {
-      console.warn("Unable to sync row stats", statsError);
-    }
+    queueSeenRangeSync(rows);
     renderPayload(payload, rows);
     setStatus("Live", `${selectedEventName || selectedEventId} - ${new Date(payload.fetchedAt).toLocaleTimeString()}`);
   } catch (error) {
     if (!hasRenderedData) renderError("Could not load odds", error.message);
     setStatus("Refresh failed", error.message);
   } finally {
-    isFetching = false;
+    activeOddsRequests = Math.max(0, activeOddsRequests - 1);
+    isFetching = activeOddsRequests > 0;
   }
 }
 
@@ -2093,13 +2221,37 @@ function startAutoRefresh() {
   stopAutoRefresh();
   if (!selectedEventId) return;
   fetchSelectedEvent({ manual: true });
+  fetchLiveScore().then(renderCurrentData);
+  if (ENABLE_BACKGROUND_SHEETS_SYNC) fetchBettingLedger().then(renderCurrentData);
+  if (ENABLE_BACKGROUND_SHEETS_SYNC) flushSeenRangeSync();
   refreshTimer = window.setInterval(() => fetchSelectedEvent(), REFRESH_INTERVAL_MS);
+  liveScoreRefreshTimer = window.setInterval(() => {
+    fetchLiveScore().then(renderCurrentData);
+  }, LIVE_SCORE_REFRESH_INTERVAL_MS);
+  if (ENABLE_BACKGROUND_SHEETS_SYNC) {
+    ledgerRefreshTimer = window.setInterval(() => {
+      fetchBettingLedger().then(renderCurrentData);
+    }, 30000);
+    rowStatsSyncTimer = window.setInterval(() => flushSeenRangeSync(), 30000);
+  }
 }
 
 function stopAutoRefresh() {
   if (refreshTimer) {
     clearInterval(refreshTimer);
     refreshTimer = null;
+  }
+  if (liveScoreRefreshTimer) {
+    clearInterval(liveScoreRefreshTimer);
+    liveScoreRefreshTimer = null;
+  }
+  if (ledgerRefreshTimer) {
+    clearInterval(ledgerRefreshTimer);
+    ledgerRefreshTimer = null;
+  }
+  if (rowStatsSyncTimer) {
+    clearInterval(rowStatsSyncTimer);
+    rowStatsSyncTimer = null;
   }
 }
 
@@ -2111,7 +2263,7 @@ async function initialize() {
     const config = await fetchSheetConfig();
     loginRows = normalizeLogins(config.loginRows || []);
     eventRows = normalizeEvents(config.eventRows || []);
-    await fetchBettingLedger();
+    fetchBettingLedger().then(renderCurrentData);
 
     if (loginRows.length === 0) {
       loginRows = normalizeLogins(config.eventRows);
@@ -2144,6 +2296,8 @@ async function initialize() {
 
     selectedEventId = localStorage.getItem(SELECTED_EVENT_KEY) || eventRows[0].id;
     renderTabs();
+    renderAccountBar();
+    fetchBettingLedger({ force: true }).then(renderCurrentData);
     startAutoRefresh();
   } catch (error) {
     renderError("Startup failed", error.message);
@@ -2155,7 +2309,7 @@ loginForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   const username = loginUser.value.trim();
   const password = loginPass.value;
-  await fetchBettingLedger();
+  loginError.textContent = "Checking login...";
 
   const user = await authenticateLogin(username, password);
   if (!user) {
@@ -2169,10 +2323,14 @@ loginForm.addEventListener("submit", async (event) => {
     name: user.name || user.username,
     role: user.role || "user"
   });
+
   setLoginVisible(false);
+  renderAccountBar();
 
   selectedEventId = localStorage.getItem(SELECTED_EVENT_KEY) || eventRows[0].id;
   renderTabs();
+  renderCurrentData();
+  fetchBettingLedger({ force: true }).then(renderCurrentData);
   startAutoRefresh();
 });
 

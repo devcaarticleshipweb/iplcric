@@ -20,6 +20,7 @@ exports.handler = async (event) => {
 
   const upstreamUrl = new URL(ODDS_ENDPOINT);
   upstreamUrl.searchParams.set("id", id);
+  upstreamUrl.searchParams.set("_", Date.now().toString());
 
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 12000);
@@ -29,6 +30,8 @@ exports.handler = async (event) => {
       signal: controller.signal,
       headers: {
         accept: "application/json, text/plain, */*",
+        "cache-control": "no-cache",
+        pragma: "no-cache",
         "user-agent": "Fair91OddsViewer/1.0"
       }
     });
