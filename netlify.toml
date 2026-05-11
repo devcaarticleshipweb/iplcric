@@ -14,32 +14,32 @@
 
 [[redirects]]
   from = "/api/row-stats"
-  to = "/.netlify/functions/sheets-backed?action=rowStats"
+  to = "/.netlify/functions/row-stats"
   status = 200
 
 [[redirects]]
   from = "/api/betting-ledger"
-  to = "/.netlify/functions/sheets-backed?action=getLedger"
+  to = "/.netlify/functions/betting-ledger"
   status = 200
 
 [[redirects]]
   from = "/api/betting-auth"
-  to = "/.netlify/functions/sheets-backed?action=auth"
+  to = "/.netlify/functions/betting-auth"
   status = 200
 
 [[redirects]]
   from = "/api/betting-users"
-  to = "/.netlify/functions/sheets-backed?action=createUser"
+  to = "/.netlify/functions/betting-users"
   status = 200
 
 [[redirects]]
   from = "/api/bets"
-  to = "/.netlify/functions/sheets-backed?action=placeBet"
+  to = "/.netlify/functions/bets"
   status = 200
 
 [[redirects]]
   from = "/api/bets/settle"
-  to = "/.netlify/functions/sheets-backed?action=settleBet"
+  to = "/.netlify/functions/bet-settle"
   status = 200
 
 [[redirects]]

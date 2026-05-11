@@ -9,9 +9,9 @@ function json(statusCode, payload) {
   };
 }
 
-exports.handler = async (event) => {
+async function runSheetsAction(event, forcedAction = "") {
   const apiUrl = String(process.env.FAIR91_SHEETS_API_URL || "").trim();
-  const action = String(event.queryStringParameters?.action || "").trim();
+  const action = String(forcedAction || event.queryStringParameters?.action || "").trim();
 
   if (!apiUrl) {
     return json(502, {
@@ -54,4 +54,7 @@ exports.handler = async (event) => {
       detail: error.message
     });
   }
-};
+}
+
+exports.runSheetsAction = runSheetsAction;
+exports.handler = (event) => runSheetsAction(event);

@@ -1,10 +1,10 @@
 /api/event-fancy /.netlify/functions/event-fancy 200
 /api/sheet-config /.netlify/functions/sheet-config 200
-/api/row-stats /.netlify/functions/sheets-backed?action=rowStats 200
-/api/betting-ledger /.netlify/functions/sheets-backed?action=getLedger 200
-/api/betting-auth /.netlify/functions/sheets-backed?action=auth 200
-/api/betting-users /.netlify/functions/sheets-backed?action=createUser 200
-/api/bets /.netlify/functions/sheets-backed?action=placeBet 200
-/api/bets/settle /.netlify/functions/sheets-backed?action=settleBet 200
+/api/row-stats /.netlify/functions/row-stats 200
+/api/betting-ledger /.netlify/functions/betting-ledger 200
+/api/betting-auth /.netlify/functions/betting-auth 200
+/api/betting-users /.netlify/functions/betting-users 200
+/api/bets /.netlify/functions/bets 200
+/api/bets/settle /.netlify/functions/bet-settle 200
 /api/live-score /.netlify/functions/live-score 200
 /api/mcenter/livescore/:matchId /.netlify/functions/live-score?matchId=:matchId 200
