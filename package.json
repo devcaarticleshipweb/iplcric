@@ -1,0 +1,12 @@
+{
+  "name": "fair91-odds-viewer",
+  "version": "1.0.0",
+  "private": true,
+  "description": "A small website for fetching and displaying Fair91 event fancy odds.",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

@@ -1,0 +1,29 @@
+﻿{
+    "users":  {
+                  "balance":  90000,
+                  "username":  "test",
+                  "createdAt":  "2026-05-11T08:58:45.8721106Z",
+                  "password":  "test",
+                  "role":  "user",
+                  "name":  "testing"
+              },
+    "bets":  [
+                 {
+                     "id":  "046bd8987b3f",
+                     "username":  "test",
+                     "eventId":  "28127348",
+                     "eventName":  "IPL Winner Bookmaker",
+                     "marketKey":  "BOOKMAKER:42821393",
+                     "marketName":  "Lucknow Super Giants",
+                     "marketType":  "BOOKMAKER",
+                     "side":  "Back",
+                     "odds":  10000,
+                     "stake":  10000,
+                     "estimatedProfit":  1000000,
+                     "status":  "PENDING",
+                     "result":  "",
+                     "pnl":  0,
+                     "placedAt":  "2026-05-11T08:59:48.6441954Z"
+                 }
+             ]
+}

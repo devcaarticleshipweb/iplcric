@@ -12,7 +12,6 @@ const loginError = document.querySelector("#login-error");
 const REFRESH_INTERVAL_MS = 1000;
 const SESSION_KEY = "fair91.auth";
 const SELECTED_EVENT_KEY = "fair91.selectedEventId";
-const ROW_STATS_KEY = "fair91.rowStats";
 
 let refreshTimer = null;
 let isFetching = false;
@@ -31,6 +30,11 @@ let liveScoreState = {
 let lastOverStripSignature = "";
 let overStripScrollLeft = null;
 let liveScoreCompact = false;
+let bettingLedger = {
+  users: [],
+  bets: [],
+  summary: []
+};
 
 function setStatus(message, meta = "") {
   statusText.textContent = message;
@@ -39,19 +43,6 @@ function setStatus(message, meta = "") {
 
 function makeStatsKey(eventId, rowKey) {
   return `${eventId || "unknown"}::${rowKey}`;
-}
-
-function loadRowStats() {
-  try {
-    const saved = JSON.parse(localStorage.getItem(ROW_STATS_KEY) || "{}");
-    return new Map(Object.entries(saved));
-  } catch {
-    return new Map();
-  }
-}
-
-function saveRowStats() {
-  localStorage.setItem(ROW_STATS_KEY, JSON.stringify(Object.fromEntries(rowStats)));
 }
 
 function simpleValue(value) {
@@ -92,8 +83,8 @@ function setLoginVisible(visible) {
   loginLayer.classList.toggle("hidden", !visible);
 }
 
-function saveSession(username) {
-  localStorage.setItem(SESSION_KEY, JSON.stringify({ username }));
+function saveSession(user) {
+  localStorage.setItem(SESSION_KEY, JSON.stringify(user));
 }
 
 function loadSession() {
@@ -147,13 +138,19 @@ function normalizeTabularRows(rows) {
 }
 
 function normalizeLogins(rows) {
-  return normalizeTabularRows(rows)
+  const normalized = normalizeTabularRows(rows)
     .map((row) => ({
       username: getFieldValue(row, ["username", "user", "login", "email", "id"]),
       password: getFieldValue(row, ["password", "pass", "pwd", "pin"]),
-      name: getFieldValue(row, ["name", "title", "board_name", "display_name"])
+      name: getFieldValue(row, ["name", "title", "board_name", "display_name"]),
+      role: getFieldValue(row, ["role", "type", "user_type", "usertype"])
     }))
     .filter((row) => row.username && row.password);
+
+  return normalized.map((row, index) => ({
+    ...row,
+    role: row.role || (index === 0 ? "master" : "user")
+  }));
 }
 
 function normalizeEvents(rows) {
@@ -209,11 +206,55 @@ function validateLogin(username, password) {
   const inputUser = String(username || "").trim().toLowerCase();
   const inputPass = String(password || "").trim();
 
-  return loginRows.some((row) => {
+  const allUsers = [
+    ...loginRows,
+    ...(Array.isArray(bettingLedger.users) ? bettingLedger.users : [])
+  ];
+
+  return allUsers.find((row) => {
     const rowUser = String(row.username || "").trim().toLowerCase();
     const rowPass = String(row.password || "").trim();
     return rowUser === inputUser && rowPass === inputPass;
   });
+}
+
+async function authenticateLogin(username, password) {
+  const sheetUser = validateLogin(username, password);
+  if (sheetUser) return sheetUser;
+
+  const response = await fetch("/api/betting-auth", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ username, password })
+  });
+  const payload = await response.json();
+  if (!response.ok) return null;
+  return payload.user;
+}
+
+function currentSession() {
+  return loadSession() || null;
+}
+
+function isMasterSession() {
+  return String(currentSession()?.role || "").toLowerCase() === "master";
+}
+
+function displayMoney(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return simpleValue(value);
+  return number.toLocaleString("en-IN", { maximumFractionDigits: 2 });
+}
+
+async function fetchBettingLedger() {
+  try {
+    const response = await fetch("/api/betting-ledger");
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.detail || payload.error || "Unable to load betting ledger.");
+    bettingLedger = payload;
+  } catch (error) {
+    console.warn("Unable to load betting ledger", error);
+  }
 }
 
 function renderTabs() {
@@ -316,8 +357,36 @@ function updateSeenRange(key, backPrice, layPrice) {
   stats.min = stats.min === null ? nowMin : Math.min(stats.min, nowMin);
   stats.max = stats.max === null ? nowMax : Math.max(stats.max, nowMax);
   rowStats.set(storageKey, stats);
-  saveRowStats();
   return stats;
+}
+
+async function syncSeenRanges(rows) {
+  if (!selectedEventId) return;
+
+  const response = await fetch("/api/row-stats", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json"
+    },
+    body: JSON.stringify({
+      eventId: selectedEventId,
+      rows: rows.map((row) => ({
+        key: row.key,
+        backPrice: row.backPrice,
+        layPrice: row.layPrice
+      }))
+    })
+  });
+
+  const payload = await response.json();
+  if (!response.ok) throw new Error(payload.detail || payload.error || "Unable to update row stats.");
+
+  Object.entries(payload.stats || {}).forEach(([key, stats]) => {
+    rowStats.set(makeStatsKey(selectedEventId, key), {
+      min: stats?.min ?? null,
+      max: stats?.max ?? null
+    });
+  });
 }
 
 function createSummary(payload, total) {
@@ -405,10 +474,10 @@ const BALL_STATUS_MAP = {
   nb: "No Ball",
   lb: "Leg Bye",
   by: "Bye",
-  "4": "Four",
-  "6": "Six",
-  four: "Four",
-  six: "Six"
+  "4": "4",
+  "6": "6",
+  four: "4",
+  six: "6"
 };
 
 function flattenScoreObjects(value, out = [], depth = 0) {
@@ -1252,7 +1321,8 @@ function createOverStrip(model) {
     parsePastOver(model.overHistory?.last1)
   ].filter(Boolean);
   const lastOverNo = parsePastOver(model.overHistory?.last1)?.number;
-  const currentLabel = Number.isFinite(lastOverNo) ? `Over ${lastOverNo + 1}` : "Current";
+  const currentNumber = Number.isFinite(lastOverNo) ? lastOverNo + 1 : Number(model.overs?.split?.(".")?.[0]) + 1;
+  const currentLabel = Number.isFinite(currentNumber) ? `Over ${currentNumber}` : "Over";
   const currentOver = parseCurrentOver(model.overHistory?.current, currentLabel);
 
   if (historyOvers.length === 0 && !currentOver) return strip;
@@ -1359,6 +1429,13 @@ function createBallPills(value) {
   return wrap;
 }
 
+function ballStatusClass(statusCode, statusText) {
+  const normalized = String(statusCode || statusText || "").toLowerCase().trim();
+  if (normalized === "4" || normalized === "four") return " boundary-four";
+  if (normalized === "6" || normalized === "six") return " boundary-six";
+  return "";
+}
+
 function createLiveScoreSection() {
   const section = document.createElement("section");
   section.className = "live-score-section cricket-score";
@@ -1400,7 +1477,7 @@ function createLiveScoreSection() {
           <span>${formatOvers(model.overs)}</span>
         </div>
       </div>
-      <div class="ball-status">${simpleValue(model.statusText)}</div>
+      <div class="ball-status${ballStatusClass(model.statusCode, model.statusText)}">${simpleValue(model.statusText)}</div>
       ${model.completedTeam ? `
         <div class="team-score score-meta-team">
           <span class="team-name">${simpleValue(model.completedTeam)}</span>
@@ -1475,10 +1552,130 @@ function addPulseIfChanged(box, key, side, value) {
   }
 }
 
-function createPriceBox(kind, key, price, size) {
+function isFancyBet(rowData) {
+  return rowData?.marketType === "FANCY";
+}
+
+function fancyRateForSide(rowData, side) {
+  if (!isFancyBet(rowData)) return "";
+  return side === "Yes" ? rowData.backSize : rowData.laySize;
+}
+
+function fancyRateAmount(stake, rate) {
+  const stakeValue = Number(stake);
+  const rateValue = Number(rate);
+  if (!Number.isFinite(stakeValue) || !Number.isFinite(rateValue)) return 0;
+  return Number(((stakeValue * rateValue) / 100).toFixed(2));
+}
+
+function fancyLiability(stake, rate, side = "Yes") {
+  return side === "No" ? fancyRateAmount(stake, rate) : Number(stake);
+}
+
+function fancyProfit(stake, rate, side = "Yes") {
+  return side === "Yes" ? fancyRateAmount(stake, rate) : Number(stake);
+}
+
+async function placeBet(rowData, side, odds, rate = "") {
+  const session = currentSession();
+  if (!session) {
+    setLoginVisible(true);
+    return;
+  }
+
+  if (!isActiveStatus(rowData.status)) {
+    alert(`Bet cannot be placed because this market is ${simpleValue(rowData.status)}.`);
+    return;
+  }
+
+  const numericOdds = toNum(odds);
+  if (numericOdds === null || numericOdds <= 0) {
+    alert("Bet cannot be placed because odds are not available.");
+    return;
+  }
+
+  const fancyMode = isFancyBet(rowData);
+  const rawStake = window.prompt(
+    fancyMode
+      ? `Stake for ${rowData.label}\n${side} ${odds}/${rate}`
+      : `Stake for ${rowData.label}\n${side} @ ${odds}`,
+    "100"
+  );
+  if (rawStake === null) return;
+
+  const stake = Number(rawStake);
+  if (!Number.isFinite(stake) || stake <= 0) {
+    alert("Please enter a valid stake amount.");
+    return;
+  }
+
+  try {
+    const latestResponse = await fetch(`/api/event-fancy?id=${encodeURIComponent(selectedEventId)}`);
+    const latestPayload = await latestResponse.json();
+    if (!latestResponse.ok) throw new Error(latestPayload.detail || latestPayload.error || "Unable to verify latest odds.");
+
+    const latestRows = buildOddsRows(latestPayload.data);
+    const latestRow = latestRows.find((row) => row.key === rowData.key);
+    if (!latestRow) {
+      throw new Error("This market is no longer available.");
+    }
+    if (!isActiveStatus(latestRow.status)) {
+      throw new Error(`Bet rejected. Market is now ${simpleValue(latestRow.status)}.`);
+    }
+
+    const latestOdds = side === "Back" || side === "Yes" ? latestRow.backPrice : latestRow.layPrice;
+    const latestRate = fancyRateForSide(latestRow, side);
+    if (String(latestOdds) !== String(odds)) {
+      throw new Error(`Bet rejected. Odds changed from ${odds} to ${latestOdds}.`);
+    }
+    if (fancyMode && String(latestRate) !== String(rate)) {
+      throw new Error(`Bet rejected. Rate changed from ${rate} to ${latestRate}.`);
+    }
+
+    const liability = fancyMode ? fancyLiability(stake, rate, side) : stake;
+    const estimatedProfit = fancyMode ? fancyProfit(stake, rate, side) : "";
+
+    const response = await fetch("/api/bets", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        username: session.username,
+        eventId: selectedEventId,
+        eventName: selectedEventName,
+        marketKey: rowData.key,
+        marketName: rowData.label,
+        marketType: rowData.marketType,
+        side,
+        odds: numericOdds,
+        target: fancyMode ? numericOdds : "",
+        rate: fancyMode ? Number(rate) : "",
+        liability,
+        estimatedProfit,
+        stake,
+        statusAtSelection: rowData.status,
+        verifiedAt: new Date().toISOString()
+      })
+    });
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.detail || payload.error || "Unable to place bet.");
+    await fetchBettingLedger();
+    renderCurrentData();
+    alert(`Bet placed. Bet ID: ${payload.bet.id}`);
+  } catch (error) {
+    alert(error.message);
+  }
+}
+
+function createPriceBox(kind, key, price, size, rowData, sideLabel) {
   const box = document.createElement("div");
   box.className = `price-box ${kind}`;
+  box.role = "button";
+  box.tabIndex = 0;
   addPulseIfChanged(box, key, kind === "back" ? "back" : "lay", price);
+  if (rowData && !isActiveStatus(rowData.status)) {
+    box.classList.add("disabled");
+    box.title = `Betting disabled: ${simpleValue(rowData.status)}`;
+  }
 
   const priceNode = document.createElement("strong");
   priceNode.className = "price-value";
@@ -1490,6 +1687,17 @@ function createPriceBox(kind, key, price, size) {
     sizeNode.className = "size-value";
     sizeNode.textContent = simpleValue(size);
     box.append(sizeNode);
+  }
+
+  if (rowData && sideLabel && isActiveStatus(rowData.status)) {
+    box.title = isFancyBet(rowData) ? `Place ${sideLabel} bet at ${price}/${size}` : `Place ${sideLabel} bet`;
+    box.addEventListener("click", () => placeBet(rowData, sideLabel, price, size));
+    box.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        placeBet(rowData, sideLabel, price, size);
+      }
+    });
   }
   return box;
 }
@@ -1521,6 +1729,18 @@ function createMarketSection(title, columns, rows, fancyMode = false) {
     minMax.className = "seen-range";
     minMax.textContent = `Min ${simpleValue(range.min)} | Max ${simpleValue(range.max)}`;
     left.append(name, minMax);
+    if (fancyMode && hasFancyLadder(rowData.key)) {
+      const ladder = document.createElement("button");
+      ladder.type = "button";
+      ladder.className = "ladder-btn";
+      ladder.title = "Show fancy ladder";
+      ladder.textContent = "▦";
+      ladder.addEventListener("click", (event) => {
+        event.stopPropagation();
+        showFancyLadder(rowData);
+      });
+      left.append(ladder);
+    }
     nameCell.append(left);
     if (!isActiveStatus(rowData.status)) {
       nameCell.append(createStatusNode(simpleValue(rowData.status)));
@@ -1532,11 +1752,11 @@ function createMarketSection(title, columns, rows, fancyMode = false) {
     thirdCell.className = "box-cell";
 
     if (fancyMode) {
-      secondCell.append(createPriceBox("lay", rowData.key, rowData.layPrice, rowData.laySize));
-      thirdCell.append(createPriceBox("back", rowData.key, rowData.backPrice, rowData.backSize));
+      secondCell.append(createPriceBox("lay", rowData.key, rowData.layPrice, rowData.laySize, rowData, "No"));
+      thirdCell.append(createPriceBox("back", rowData.key, rowData.backPrice, rowData.backSize, rowData, "Yes"));
     } else {
-      secondCell.append(createPriceBox("back", rowData.key, rowData.backPrice));
-      thirdCell.append(createPriceBox("lay", rowData.key, rowData.layPrice));
+      secondCell.append(createPriceBox("back", rowData.key, rowData.backPrice, undefined, rowData, "Back"));
+      thirdCell.append(createPriceBox("lay", rowData.key, rowData.layPrice, undefined, rowData, "Lay"));
     }
 
     tr.append(nameCell, secondCell, thirdCell);
@@ -1544,6 +1764,245 @@ function createMarketSection(title, columns, rows, fancyMode = false) {
   });
 
   section.append(table);
+  return section;
+}
+
+function currentUserFancyBets(marketKey) {
+  const session = currentSession();
+  if (!session) return [];
+  const isMaster = isMasterSession();
+  return (bettingLedger.bets || []).filter((bet) => {
+    if (bet.marketType !== "FANCY") return false;
+    if (bet.marketKey !== marketKey) return false;
+    if (bet.status && bet.status !== "PENDING") return false;
+    return isMaster || String(bet.username).toLowerCase() === String(session.username).toLowerCase();
+  });
+}
+
+function hasFancyLadder(marketKey) {
+  return currentUserFancyBets(marketKey).length > 0;
+}
+
+function fancyBetPnlAtResult(bet, result) {
+  const stake = Number(bet.stake);
+  const target = Number(bet.target || bet.odds);
+  const rate = Number(bet.rate || 100);
+  if (!Number.isFinite(stake) || !Number.isFinite(target) || !Number.isFinite(rate)) return 0;
+
+  const liability = fancyLiability(stake, rate, bet.side);
+  const profit = fancyProfit(stake, rate, bet.side);
+  if (bet.side === "Yes") {
+    return result >= target ? profit : -liability;
+  }
+  if (bet.side === "No") {
+    return result < target ? profit : -liability;
+  }
+  return 0;
+}
+
+function fancyLadderRows(bets) {
+  const targets = [...new Set(bets.map((bet) => Number(bet.target || bet.odds)).filter(Number.isFinite))].sort((a, b) => a - b);
+  if (targets.length === 0) return [];
+
+  const starts = [0, ...targets];
+  return starts.map((start, index) => {
+    const next = starts[index + 1];
+    const end = next === undefined ? 2000 : next - 1;
+    const pnl = bets.reduce((sum, bet) => sum + fancyBetPnlAtResult(bet, start), 0);
+    return {
+      range: `${start}-${end}`,
+      pnl
+    };
+  });
+}
+
+function showFancyLadder(rowData) {
+  const bets = currentUserFancyBets(rowData.key);
+  const rows = fancyLadderRows(bets);
+  const existing = document.querySelector(".ladder-modal-layer");
+  if (existing) existing.remove();
+
+  const layer = document.createElement("div");
+  layer.className = "ladder-modal-layer";
+  layer.innerHTML = `
+    <div class="ladder-modal" role="dialog" aria-modal="true">
+      <div class="ladder-modal-head">
+        <div>
+          <span>Fancy Ladder</span>
+          <strong>${simpleValue(rowData.label)}</strong>
+        </div>
+        <button type="button" class="ladder-close">×</button>
+      </div>
+      <div class="ladder-bet-list">
+        ${bets.map((bet) => `
+          <div>
+            <strong>${simpleValue(bet.side)} ${simpleValue(bet.target || bet.odds)}/${simpleValue(bet.rate)}</strong>
+            <span>Stake ${displayMoney(bet.stake)} | Liability ${displayMoney(bet.liability || fancyLiability(bet.stake, bet.rate || 100, bet.side))}</span>
+          </div>
+        `).join("")}
+      </div>
+      <table class="ladder-table">
+        <thead><tr><th>Result Range</th><th>P/L</th></tr></thead>
+        <tbody>
+          ${rows.map((row) => `
+            <tr>
+              <td>${row.range}</td>
+              <td class="${row.pnl < 0 ? "loss" : "profit"}">${row.pnl < 0 ? "-" : "+"}${displayMoney(Math.abs(row.pnl))}</td>
+            </tr>
+          `).join("") || '<tr><td colspan="2">No pending fancy bets.</td></tr>'}
+        </tbody>
+      </table>
+    </div>
+  `;
+  layer.querySelector(".ladder-close").addEventListener("click", () => layer.remove());
+  layer.addEventListener("click", (event) => {
+    if (event.target === layer) layer.remove();
+  });
+  document.body.append(layer);
+}
+
+async function createUserFromPrompt() {
+  if (!isMasterSession()) return;
+
+  const username = window.prompt("New username");
+  if (!username) return;
+  const password = window.prompt(`Password for ${username}`);
+  if (!password) return;
+  const name = window.prompt("Display name", username) || username;
+  const balanceInput = window.prompt("Opening ledger balance", "10000") || "0";
+  const balance = Number(balanceInput);
+
+  if (!Number.isFinite(balance) || balance < 0) {
+    alert("Please enter a valid opening balance.");
+    return;
+  }
+
+  try {
+    const response = await fetch("/api/betting-users", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ username, password, name, balance })
+    });
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.detail || payload.error || "Unable to create user.");
+    await fetchBettingLedger();
+    renderCurrentData();
+    alert(`User created: ${payload.user.username}`);
+  } catch (error) {
+    alert(error.message);
+  }
+}
+
+async function settleBet(betId, result) {
+  if (!isMasterSession()) return;
+
+  try {
+    const response = await fetch("/api/bets/settle", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ betId, result })
+    });
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.detail || payload.error || "Unable to settle bet.");
+    await fetchBettingLedger();
+    renderCurrentData();
+  } catch (error) {
+    alert(error.message);
+  }
+}
+
+function userSummary(username) {
+  return (bettingLedger.summary || []).find((row) => String(row.username).toLowerCase() === String(username).toLowerCase()) || {};
+}
+
+function userLedgerRecord(username) {
+  return (bettingLedger.users || []).find((row) => String(row.username).toLowerCase() === String(username).toLowerCase()) || {};
+}
+
+function createBettingPanel() {
+  const session = currentSession();
+  const section = document.createElement("section");
+  section.className = "betting-panel";
+
+  if (!session) return section;
+
+  const summary = userSummary(session.username);
+  const ledgerUser = userLedgerRecord(session.username);
+  const isMaster = isMasterSession();
+  const myBets = (bettingLedger.bets || [])
+    .filter((bet) => isMaster || String(bet.username).toLowerCase() === String(session.username).toLowerCase())
+    .slice(-10)
+    .reverse();
+
+  section.innerHTML = `
+    <div class="betting-head">
+      <div>
+        <span>${isMaster ? "Master ID" : "User ID"}</span>
+        <strong>${simpleValue(session.username)}</strong>
+      </div>
+      <div>
+        <span>Balance</span>
+        <strong>${displayMoney(ledgerUser.balance ?? summary.balance ?? 0)}</strong>
+      </div>
+      <div>
+        <span>P/L</span>
+        <strong class="${Number(summary.pnl || 0) < 0 ? "loss" : "profit"}">${displayMoney(summary.pnl || 0)}</strong>
+      </div>
+      ${isMaster ? '<button type="button" class="ledger-action create-user-btn">Create User</button>' : ""}
+    </div>
+    ${isMaster ? `
+      <div class="master-grid">
+        <div class="ledger-table-wrap">
+          <h3>User Performance</h3>
+          <table class="ledger-table">
+            <thead><tr><th>User</th><th>Balance</th><th>Stake</th><th>Exposure</th><th>P/L</th><th>Bets</th></tr></thead>
+            <tbody>
+              ${(bettingLedger.summary || []).map((row) => `
+                <tr>
+                  <td>${simpleValue(row.username)}</td>
+                  <td>${displayMoney(row.balance)}</td>
+                  <td>${displayMoney(row.totalStake)}</td>
+                  <td>${displayMoney(row.exposure)}</td>
+                  <td class="${Number(row.pnl || 0) < 0 ? "loss" : "profit"}">${displayMoney(row.pnl)}</td>
+                  <td>${simpleValue(row.betCount)}</td>
+                </tr>
+              `).join("") || '<tr><td colspan="6">No users yet.</td></tr>'}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    ` : ""}
+    <div class="ledger-table-wrap">
+      <h3>${isMaster ? "Recent Bets" : "My Bets"}</h3>
+      <table class="ledger-table">
+        <thead><tr><th>User</th><th>Event</th><th>Market</th><th>Side</th><th>Odds</th><th>Stake</th><th>Status</th>${isMaster ? "<th>Settle</th>" : ""}</tr></thead>
+        <tbody>
+          ${myBets.map((bet) => `
+            <tr>
+              <td>${simpleValue(bet.username)}</td>
+              <td>${simpleValue(bet.eventName)}</td>
+              <td>${simpleValue(bet.marketName)}</td>
+              <td>${simpleValue(bet.side)}</td>
+              <td>${bet.marketType === "FANCY" ? `${simpleValue(bet.target || bet.odds)}/${simpleValue(bet.rate)}` : simpleValue(bet.odds)}</td>
+              <td>${displayMoney(bet.stake)}</td>
+              <td>${simpleValue(bet.status)}</td>
+              ${isMaster ? `<td>${bet.status === "PENDING" ? `
+                <button type="button" class="settle-btn" data-bet-id="${bet.id}" data-result="WIN">W</button>
+                <button type="button" class="settle-btn" data-bet-id="${bet.id}" data-result="LOSE">L</button>
+                <button type="button" class="settle-btn" data-bet-id="${bet.id}" data-result="VOID">V</button>
+              ` : simpleValue(bet.result)}</td>` : ""}
+            </tr>
+          `).join("") || `<tr><td colspan="${isMaster ? 8 : 7}">No bets placed yet.</td></tr>`}
+        </tbody>
+      </table>
+    </div>
+  `;
+
+  section.querySelector(".create-user-btn")?.addEventListener("click", createUserFromPrompt);
+  section.querySelectorAll(".settle-btn").forEach((button) => {
+    button.addEventListener("click", () => settleBet(button.dataset.betId, button.dataset.result));
+  });
+
   return section;
 }
 
@@ -1557,12 +2016,15 @@ function createRawPanel(data) {
   return panel;
 }
 
-function renderPayload(payload) {
-  const rows = buildOddsRows(payload.data);
+function renderPayload(payload, preparedRows = null) {
+  window.__fair91LastPayload = payload;
+  window.__fair91LastRows = preparedRows;
+  const rows = preparedRows || buildOddsRows(payload.data);
   const bookmakerRows = rows.filter((row) => row.marketType === "BOOKMAKER");
   const fancyRows = rows.filter((row) => row.marketType === "FANCY");
 
   const fragment = document.createDocumentFragment();
+  fragment.append(createBettingPanel());
   fragment.append(createLiveScoreSection());
 
   if (bookmakerRows.length) fragment.append(createMarketSection("Bookmaker", ["Bookmaker", "Back", "Lay"], bookmakerRows, false));
@@ -1584,6 +2046,12 @@ function renderPayload(payload) {
   lastRowsByKey = nextCache;
 }
 
+function renderCurrentData() {
+  if (window.__fair91LastPayload) {
+    renderPayload(window.__fair91LastPayload, window.__fair91LastRows || null);
+  }
+}
+
 function renderError(message, detail = "") {
   const error = document.createElement("div");
   error.className = "error-state";
@@ -1600,11 +2068,18 @@ async function fetchSelectedEvent({ manual = false } = {}) {
   try {
     const [oddsResult] = await Promise.all([
       fetch(`/api/event-fancy?id=${encodeURIComponent(selectedEventId)}`),
-      fetchLiveScore()
+      fetchLiveScore(),
+      fetchBettingLedger()
     ]);
     const payload = await oddsResult.json();
     if (!oddsResult.ok) throw new Error(payload.detail || payload.error || "Request failed.");
-    renderPayload(payload);
+    const rows = buildOddsRows(payload.data);
+    try {
+      await syncSeenRanges(rows);
+    } catch (statsError) {
+      console.warn("Unable to sync row stats", statsError);
+    }
+    renderPayload(payload, rows);
     setStatus("Live", `${selectedEventName || selectedEventId} - ${new Date(payload.fetchedAt).toLocaleTimeString()}`);
   } catch (error) {
     if (!hasRenderedData) renderError("Could not load odds", error.message);
@@ -1630,12 +2105,13 @@ function stopAutoRefresh() {
 
 async function initialize() {
   setStatus("Loading", "Reading Google Sheets config");
-  rowStats = loadRowStats();
+  rowStats = new Map();
 
   try {
     const config = await fetchSheetConfig();
     loginRows = normalizeLogins(config.loginRows || []);
     eventRows = normalizeEvents(config.eventRows || []);
+    await fetchBettingLedger();
 
     if (loginRows.length === 0) {
       loginRows = normalizeLogins(config.eventRows);
@@ -1675,18 +2151,24 @@ async function initialize() {
   }
 }
 
-loginForm.addEventListener("submit", (event) => {
+loginForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   const username = loginUser.value.trim();
   const password = loginPass.value;
+  await fetchBettingLedger();
 
-  if (!validateLogin(username, password)) {
+  const user = await authenticateLogin(username, password);
+  if (!user) {
     loginError.textContent = `Invalid username or password. Loaded credential rows: ${loginRows.length}`;
     return;
   }
 
   loginError.textContent = "";
-  saveSession(username);
+  saveSession({
+    username: user.username,
+    name: user.name || user.username,
+    role: user.role || "user"
+  });
   setLoginVisible(false);
 
   selectedEventId = localStorage.getItem(SELECTED_EVENT_KEY) || eventRows[0].id;

@@ -1,0 +1,53 @@
+[build]
+  publish = "public"
+  functions = "netlify/functions"
+
+[[redirects]]
+  from = "/api/event-fancy"
+  to = "/.netlify/functions/event-fancy"
+  status = 200
+
+[[redirects]]
+  from = "/api/sheet-config"
+  to = "/.netlify/functions/sheet-config"
+  status = 200
+
+[[redirects]]
+  from = "/api/row-stats"
+  to = "/.netlify/functions/sheets-backed?action=rowStats"
+  status = 200
+
+[[redirects]]
+  from = "/api/betting-ledger"
+  to = "/.netlify/functions/sheets-backed?action=getLedger"
+  status = 200
+
+[[redirects]]
+  from = "/api/betting-auth"
+  to = "/.netlify/functions/sheets-backed?action=auth"
+  status = 200
+
+[[redirects]]
+  from = "/api/betting-users"
+  to = "/.netlify/functions/sheets-backed?action=createUser"
+  status = 200
+
+[[redirects]]
+  from = "/api/bets"
+  to = "/.netlify/functions/sheets-backed?action=placeBet"
+  status = 200
+
+[[redirects]]
+  from = "/api/bets/settle"
+  to = "/.netlify/functions/sheets-backed?action=settleBet"
+  status = 200
+
+[[redirects]]
+  from = "/api/live-score"
+  to = "/.netlify/functions/live-score"
+  status = 200
+
+[[redirects]]
+  from = "/api/mcenter/livescore/:matchId"
+  to = "/.netlify/functions/live-score?matchId=:matchId"
+  status = 200
