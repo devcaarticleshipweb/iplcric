@@ -12,6 +12,8 @@ const accountBar = document.querySelector("#account-bar");
 
 const REFRESH_INTERVAL_MS = 1000;
 const LIVE_SCORE_REFRESH_INTERVAL_MS = 3000;
+const MASTER_LEDGER_REFRESH_INTERVAL_MS = 12000;
+const BACKGROUND_LEDGER_TIMEOUT_MS = 3000;
 const ENABLE_BACKGROUND_SHEETS_SYNC = false;
 const SESSION_KEY = "fair91.auth";
 const SELECTED_EVENT_KEY = "fair91.selectedEventId";
@@ -19,6 +21,7 @@ const SELECTED_EVENT_KEY = "fair91.selectedEventId";
 let refreshTimer = null;
 let liveScoreRefreshTimer = null;
 let ledgerRefreshTimer = null;
+let masterLedgerSyncStopped = false;
 let rowStatsSyncTimer = null;
 let isFetching = false;
 let oddsRequestSeq = 0;
@@ -99,6 +102,10 @@ function setLoginVisible(visible) {
 
 function saveSession(user) {
   localStorage.setItem(SESSION_KEY, JSON.stringify(user));
+}
+
+function clearSession() {
+  localStorage.removeItem(SESSION_KEY);
 }
 
 function loadSession() {
@@ -207,6 +214,14 @@ function applyBoardTitle() {
   boardTitle.textContent = titleFromSheet || "Fair91 Live Board";
 }
 
+function selectedEventConfig() {
+  return eventRows.find((event) => event.id === selectedEventId) || null;
+}
+
+function hasLiveScoreConfig() {
+  return Boolean(String(selectedEventConfig()?.scoreKey || "").trim());
+}
+
 async function fetchSheetConfig() {
   const response = await fetch("/api/sheet-config");
   const payload = await response.json();
@@ -250,6 +265,19 @@ function currentSession() {
   return loadSession() || null;
 }
 
+function logout() {
+  stopAutoRefresh();
+  clearSession();
+  bettingLedger = { users: [], bets: [], summary: [] };
+  liveScoreState = { data: null, error: "", fetchedAt: "" };
+  loginPass.value = "";
+  loginError.textContent = "";
+  renderAccountBar();
+  refreshOpenBetSlipModal();
+  setLoginVisible(true);
+  setStatus("Login required", "");
+}
+
 function isMasterSession() {
   return String(currentSession()?.role || "").toLowerCase() === "master";
 }
@@ -260,22 +288,25 @@ function displayMoney(value) {
   return number.toLocaleString("en-IN", { maximumFractionDigits: 2 });
 }
 
-async function fetchBettingLedger({ force = false } = {}) {
+async function fetchBettingLedger({ force = false, timeoutMs = 0 } = {}) {
   if (isLedgerFetching && ledgerFetchPromise && !force) return ledgerFetchPromise;
   isLedgerFetching = true;
 
   ledgerFetchPromise = (async () => {
+    const controller = timeoutMs > 0 ? new AbortController() : null;
+    const timeout = controller ? window.setTimeout(() => controller.abort(), timeoutMs) : null;
     try {
       const ledgerUrl = force ? `/api/betting-ledger?_=${Date.now()}` : "/api/betting-ledger";
-      const response = await fetch(ledgerUrl, { cache: "no-store" });
+      const response = await fetch(ledgerUrl, { cache: "no-store", signal: controller?.signal });
       const payload = await response.json();
       if (!response.ok) throw new Error(payload.detail || payload.error || "Unable to load betting ledger.");
       bettingLedger = payload;
       return payload;
     } catch (error) {
-      console.warn("Unable to load betting ledger", error);
+      if (error.name !== "AbortError") console.warn("Unable to load betting ledger", error);
       return bettingLedger;
     } finally {
+      if (timeout) window.clearTimeout(timeout);
       isLedgerFetching = false;
       ledgerFetchPromise = null;
     }
@@ -455,15 +486,16 @@ function createSummary(payload, total) {
 
 async function fetchLiveScore() {
   if (isLiveScoreFetching) return;
+  if (!hasLiveScoreConfig()) {
+    liveScoreState = { data: null, error: "", fetchedAt: "" };
+    return;
+  }
+
   isLiveScoreFetching = true;
   try {
-    const selected = eventRows.find((event) => event.id === selectedEventId);
+    const selected = selectedEventConfig();
     const scoreKey = selected?.scoreKey || "";
     const cricbuzzMatchId = selected?.cricbuzzMatchId || "";
-
-    if (!scoreKey) {
-      throw new Error("Live score key missing in Events sheet.");
-    }
 
     const scorePayload = await fetchJsonPayload(`/api/live-score?key=${encodeURIComponent(scoreKey)}`);
     let cricbuzzPayload = null;
@@ -1633,6 +1665,14 @@ function fancyProfit(stake, rate, side = "Yes") {
   return side === "Yes" ? fancyRateAmount(stake, rate) : Number(stake);
 }
 
+function betRunValue(bet) {
+  return bet?.run || bet?.target || bet?.odds || "";
+}
+
+function betRateValue(bet) {
+  return bet?.rate || "";
+}
+
 async function placeBet(rowData, side, odds, rate = "") {
   const session = currentSession();
   if (!session) {
@@ -1691,6 +1731,8 @@ async function placeBet(rowData, side, odds, rate = "") {
 
     const liability = fancyMode ? fancyLiability(stake, rate, side) : stake;
     const estimatedProfit = fancyMode ? fancyProfit(stake, rate, side) : "";
+    const run = fancyMode ? numericOdds : "";
+    const rateValue = fancyMode ? Number(rate) : "";
 
     const response = await fetch("/api/bets", {
       method: "POST",
@@ -1704,8 +1746,9 @@ async function placeBet(rowData, side, odds, rate = "") {
         marketType: rowData.marketType,
         side,
         odds: numericOdds,
-        target: fancyMode ? numericOdds : "",
-        rate: fancyMode ? Number(rate) : "",
+        run,
+        target: run,
+        rate: rateValue,
         liability,
         estimatedProfit,
         stake,
@@ -1842,7 +1885,7 @@ function hasFancyLadder(marketKey) {
 
 function fancyBetPnlAtResult(bet, result) {
   const stake = Number(bet.stake);
-  const target = Number(bet.target || bet.odds);
+  const target = Number(betRunValue(bet));
   const rate = Number(bet.rate || 100);
   if (!Number.isFinite(stake) || !Number.isFinite(target) || !Number.isFinite(rate)) return 0;
 
@@ -1857,15 +1900,16 @@ function fancyBetPnlAtResult(bet, result) {
   return 0;
 }
 
-function fancyLadderRows(bets) {
-  const targets = [...new Set(bets.map((bet) => Number(bet.target || bet.odds)).filter(Number.isFinite))].sort((a, b) => a - b);
+function fancyLadderRows(bets, invert = false) {
+  const targets = [...new Set(bets.map((bet) => Number(betRunValue(bet))).filter(Number.isFinite))].sort((a, b) => a - b);
   if (targets.length === 0) return [];
 
   const starts = [0, ...targets];
   return starts.map((start, index) => {
     const next = starts[index + 1];
     const end = next === undefined ? 2000 : next - 1;
-    const pnl = bets.reduce((sum, bet) => sum + fancyBetPnlAtResult(bet, start), 0);
+    const userPnl = bets.reduce((sum, bet) => sum + fancyBetPnlAtResult(bet, start), 0);
+    const pnl = invert ? -userPnl : userPnl;
     return {
       range: `${start}-${end}`,
       pnl
@@ -1875,7 +1919,7 @@ function fancyLadderRows(bets) {
 
 function showFancyLadder(rowData) {
   const bets = currentUserFancyBets(rowData.key);
-  const rows = fancyLadderRows(bets);
+  const rows = fancyLadderRows(bets, isMasterSession());
   const existing = document.querySelector(".ladder-modal-layer");
   if (existing) existing.remove();
 
@@ -1893,7 +1937,7 @@ function showFancyLadder(rowData) {
       <div class="ladder-bet-list">
         ${bets.map((bet) => `
           <div>
-            <strong>${simpleValue(bet.side)} ${simpleValue(bet.target || bet.odds)}/${simpleValue(bet.rate)}</strong>
+            <strong>${simpleValue(bet.side)} ${simpleValue(betRunValue(bet))}/${simpleValue(betRateValue(bet))}</strong>
             <span>Stake ${displayMoney(bet.stake)} | Liability ${displayMoney(bet.liability || fancyLiability(bet.stake, bet.rate || 100, bet.side))}</span>
           </div>
         `).join("")}
@@ -1976,9 +2020,35 @@ function userLedgerRecord(username) {
   return (bettingLedger.users || []).find((row) => String(row.username).toLowerCase() === String(username).toLowerCase()) || {};
 }
 
+function userSummaryRowsForMaster() {
+  return (bettingLedger.summary || []).filter((row) => {
+    const user = userLedgerRecord(row.username);
+    return String(user.role || "user").toLowerCase() !== "master";
+  });
+}
+
+function masterBookSummary() {
+  const rows = userSummaryRowsForMaster();
+  return {
+    balance: rows.reduce((sum, row) => sum + (Number(row.balance) || 0), 0),
+    totalStake: rows.reduce((sum, row) => sum + (Number(row.totalStake) || 0), 0),
+    exposure: rows.reduce((sum, row) => sum + (Number(row.exposure) || 0), 0),
+    pnl: -rows.reduce((sum, row) => sum + (Number(row.pnl) || 0), 0),
+    betCount: rows.reduce((sum, row) => sum + (Number(row.betCount) || 0), 0)
+  };
+}
+
 function accountMetrics() {
   const session = currentSession();
   if (!session) return null;
+  if (isMasterSession()) {
+    const master = masterBookSummary();
+    return {
+      username: session.username,
+      balance: master.balance,
+      exposure: master.exposure
+    };
+  }
   const summary = userSummary(session.username);
   const ledgerUser = userLedgerRecord(session.username);
   return {
@@ -2012,8 +2082,10 @@ function renderAccountBar() {
       <strong>${displayMoney(metrics.exposure)}</strong>
     </div>
     <button type="button" class="bet-slip-btn">Bet Slip</button>
+    <button type="button" class="logout-btn">Logout</button>
   `;
   accountBar.querySelector(".bet-slip-btn")?.addEventListener("click", showBetSlipModal);
+  accountBar.querySelector(".logout-btn")?.addEventListener("click", logout);
 }
 
 function showBetSlipModal() {
@@ -2058,6 +2130,10 @@ function createBettingPanel() {
   const summary = userSummary(session.username);
   const ledgerUser = userLedgerRecord(session.username);
   const isMaster = isMasterSession();
+  const masterSummary = masterBookSummary();
+  const displayBalance = isMaster ? masterSummary.balance : (ledgerUser.balance ?? summary.balance ?? 0);
+  const displayPnl = isMaster ? masterSummary.pnl : (summary.pnl || 0);
+  const performanceRows = isMaster ? userSummaryRowsForMaster() : [];
   const myBets = (bettingLedger.bets || [])
     .filter((bet) => isMaster || String(bet.username).toLowerCase() === String(session.username).toLowerCase())
     .slice(-10)
@@ -2070,12 +2146,12 @@ function createBettingPanel() {
         <strong>${simpleValue(session.username)}</strong>
       </div>
       <div>
-        <span>Balance</span>
-        <strong>${displayMoney(ledgerUser.balance ?? summary.balance ?? 0)}</strong>
+        <span>${isMaster ? "Users Balance" : "Balance"}</span>
+        <strong>${displayMoney(displayBalance)}</strong>
       </div>
       <div>
-        <span>P/L</span>
-        <strong class="${Number(summary.pnl || 0) < 0 ? "loss" : "profit"}">${displayMoney(summary.pnl || 0)}</strong>
+        <span>${isMaster ? "Master P/L" : "P/L"}</span>
+        <strong class="${Number(displayPnl || 0) < 0 ? "loss" : "profit"}">${displayMoney(displayPnl || 0)}</strong>
       </div>
       ${isMaster ? '<button type="button" class="ledger-action create-user-btn">Create User</button>' : ""}
     </div>
@@ -2086,7 +2162,15 @@ function createBettingPanel() {
           <table class="ledger-table">
             <thead><tr><th>User</th><th>Balance</th><th>Stake</th><th>Exposure</th><th>P/L</th><th>Bets</th></tr></thead>
             <tbody>
-              ${(bettingLedger.summary || []).map((row) => `
+              <tr>
+                <td><strong>MASTER BOOK</strong></td>
+                <td>${displayMoney(masterSummary.balance)}</td>
+                <td>${displayMoney(masterSummary.totalStake)}</td>
+                <td>${displayMoney(masterSummary.exposure)}</td>
+                <td class="${Number(masterSummary.pnl || 0) < 0 ? "loss" : "profit"}">${displayMoney(masterSummary.pnl)}</td>
+                <td>${simpleValue(masterSummary.betCount)}</td>
+              </tr>
+              ${performanceRows.map((row) => `
                 <tr>
                   <td>${simpleValue(row.username)}</td>
                   <td>${displayMoney(row.balance)}</td>
@@ -2104,7 +2188,7 @@ function createBettingPanel() {
     <div class="ledger-table-wrap">
       <h3>${isMaster ? "Recent Bets" : "My Bets"}</h3>
       <table class="ledger-table">
-        <thead><tr><th>User</th><th>Event</th><th>Market</th><th>Side</th><th>Odds</th><th>Stake</th><th>Status</th>${isMaster ? "<th>Settle</th>" : ""}</tr></thead>
+        <thead><tr><th>User</th><th>Event</th><th>Market</th><th>Side</th><th>Odds</th><th>Run</th><th>Rate</th><th>Stake</th><th>Status</th>${isMaster ? "<th>Settle</th>" : ""}</tr></thead>
         <tbody>
           ${myBets.map((bet) => `
             <tr>
@@ -2112,7 +2196,9 @@ function createBettingPanel() {
               <td>${simpleValue(bet.eventName)}</td>
               <td>${simpleValue(bet.marketName)}</td>
               <td>${simpleValue(bet.side)}</td>
-              <td>${bet.marketType === "FANCY" ? `${simpleValue(bet.target || bet.odds)}/${simpleValue(bet.rate)}` : simpleValue(bet.odds)}</td>
+              <td>${bet.marketType === "FANCY" ? "-" : simpleValue(bet.odds)}</td>
+              <td>${bet.marketType === "FANCY" ? simpleValue(betRunValue(bet)) : "-"}</td>
+              <td>${bet.marketType === "FANCY" ? simpleValue(betRateValue(bet)) : "-"}</td>
               <td>${displayMoney(bet.stake)}</td>
               <td>${simpleValue(bet.status)}</td>
               ${isMaster ? `<td>${bet.status === "PENDING" ? `
@@ -2121,7 +2207,7 @@ function createBettingPanel() {
                 <button type="button" class="settle-btn" data-bet-id="${bet.id}" data-result="VOID">V</button>
               ` : simpleValue(bet.result)}</td>` : ""}
             </tr>
-          `).join("") || `<tr><td colspan="${isMaster ? 8 : 7}">No bets placed yet.</td></tr>`}
+          `).join("") || `<tr><td colspan="${isMaster ? 10 : 9}">No bets placed yet.</td></tr>`}
         </tbody>
       </table>
     </div>
@@ -2154,7 +2240,7 @@ function renderPayload(payload, preparedRows = null) {
 
   const fragment = document.createDocumentFragment();
   renderAccountBar();
-  fragment.append(createLiveScoreSection());
+  if (hasLiveScoreConfig()) fragment.append(createLiveScoreSection());
 
   if (bookmakerRows.length) fragment.append(createMarketSection("Bookmaker", ["Bookmaker", "Back", "Lay"], bookmakerRows, false));
   if (fancyRows.length) fragment.append(createMarketSection("Fancy", ["Bookmaker", "No", "Yes"], fancyRows, true));
@@ -2180,6 +2266,28 @@ function renderCurrentData() {
   if (window.__fair91LastPayload) {
     renderPayload(window.__fair91LastPayload, window.__fair91LastRows || null);
   }
+}
+
+function renderLedgerData() {
+  renderAccountBar();
+  refreshOpenBetSlipModal();
+}
+
+function startMasterLedgerSync() {
+  masterLedgerSyncStopped = false;
+
+  const sync = async () => {
+    if (masterLedgerSyncStopped || !isMasterSession()) return;
+    if (document.visibilityState !== "hidden") {
+      await fetchBettingLedger({ timeoutMs: BACKGROUND_LEDGER_TIMEOUT_MS });
+      renderLedgerData();
+    }
+    if (!masterLedgerSyncStopped && isMasterSession()) {
+      ledgerRefreshTimer = window.setTimeout(sync, MASTER_LEDGER_REFRESH_INTERVAL_MS);
+    }
+  };
+
+  ledgerRefreshTimer = window.setTimeout(sync, MASTER_LEDGER_REFRESH_INTERVAL_MS);
 }
 
 function renderError(message, detail = "") {
@@ -2221,13 +2329,17 @@ function startAutoRefresh() {
   stopAutoRefresh();
   if (!selectedEventId) return;
   fetchSelectedEvent({ manual: true });
-  fetchLiveScore().then(renderCurrentData);
+  if (hasLiveScoreConfig()) fetchLiveScore().then(renderCurrentData);
+  else liveScoreState = { data: null, error: "", fetchedAt: "" };
   if (ENABLE_BACKGROUND_SHEETS_SYNC) fetchBettingLedger().then(renderCurrentData);
   if (ENABLE_BACKGROUND_SHEETS_SYNC) flushSeenRangeSync();
   refreshTimer = window.setInterval(() => fetchSelectedEvent(), REFRESH_INTERVAL_MS);
-  liveScoreRefreshTimer = window.setInterval(() => {
-    fetchLiveScore().then(renderCurrentData);
-  }, LIVE_SCORE_REFRESH_INTERVAL_MS);
+  if (hasLiveScoreConfig()) {
+    liveScoreRefreshTimer = window.setInterval(() => {
+      fetchLiveScore().then(renderCurrentData);
+    }, LIVE_SCORE_REFRESH_INTERVAL_MS);
+  }
+  if (isMasterSession()) startMasterLedgerSync();
   if (ENABLE_BACKGROUND_SHEETS_SYNC) {
     ledgerRefreshTimer = window.setInterval(() => {
       fetchBettingLedger().then(renderCurrentData);
@@ -2246,9 +2358,10 @@ function stopAutoRefresh() {
     liveScoreRefreshTimer = null;
   }
   if (ledgerRefreshTimer) {
-    clearInterval(ledgerRefreshTimer);
+    clearTimeout(ledgerRefreshTimer);
     ledgerRefreshTimer = null;
   }
+  masterLedgerSyncStopped = true;
   if (rowStatsSyncTimer) {
     clearInterval(rowStatsSyncTimer);
     rowStatsSyncTimer = null;
@@ -2294,6 +2407,7 @@ async function initialize() {
       return;
     }
 
+    setLoginVisible(false);
     selectedEventId = localStorage.getItem(SELECTED_EVENT_KEY) || eventRows[0].id;
     renderTabs();
     renderAccountBar();

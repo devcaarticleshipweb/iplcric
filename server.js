@@ -284,7 +284,10 @@ async function handleBets(req, res) {
     const username = String(body.username || "").trim();
     const stake = numericValue(body.stake);
     const odds = numericValue(body.odds);
-    const rate = numericValue(body.rate);
+    const isFancy = body.marketType === "FANCY";
+    const run = isFancy ? (numericValue(body.run) ?? numericValue(body.target) ?? odds) : "";
+    const target = isFancy ? (numericValue(body.target) ?? numericValue(body.run) ?? odds) : "";
+    const rate = isFancy ? numericValue(body.rate) : null;
     const liability = numericValue(body.liability) || (body.marketType === "FANCY" ? fancyLiability(stake, rate, body.side) : stake);
     if (!username || !stake || stake <= 0 || !odds || odds <= 0) {
       return sendJson(res, 400, { error: "Valid username, stake and odds are required." });
@@ -307,8 +310,9 @@ async function handleBets(req, res) {
       marketType: body.marketType,
       side: body.side,
       odds,
-      target: body.target,
-      rate: body.rate,
+      run,
+      target,
+      rate: isFancy ? rate : "",
       stake,
       liability,
       estimatedProfit: body.marketType === "FANCY" ? fancyProfit(stake, rate, body.side) : betProfit(stake, odds),

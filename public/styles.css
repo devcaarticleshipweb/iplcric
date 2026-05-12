@@ -94,15 +94,25 @@ input {
   white-space: nowrap;
 }
 
-.bet-slip-btn {
+.bet-slip-btn,
+.logout-btn {
   border: 0;
   border-radius: 8px;
   padding: 0 14px;
-  background: linear-gradient(130deg, #e4c57f, var(--gold));
-  color: #151515;
   font-weight: 900;
   cursor: pointer;
   white-space: nowrap;
+}
+
+.bet-slip-btn {
+  background: linear-gradient(130deg, #e4c57f, var(--gold));
+  color: #151515;
+}
+
+.logout-btn {
+  border: 1px solid rgba(255, 100, 100, 0.42);
+  background: rgba(255, 100, 100, 0.12);
+  color: #ffd0d0;
 }
 
 .event-tabs-wrap {

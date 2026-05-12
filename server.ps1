@@ -532,14 +532,25 @@ function Handle-BetsApi {
     $Stake = Get-NumericValue -Value $Body.stake
     $Odds = Get-NumericValue -Value $Body.odds
     $Liability = Get-NumericValue -Value $Body.liability
-    $Rate = Get-NumericValue -Value $Body.rate
+    $IsFancy = $Body.marketType -eq "FANCY"
+    $Rate = if ($IsFancy) { Get-NumericValue -Value $Body.rate } else { $null }
+    $Run = ""
+    $Target = ""
+    if ($IsFancy) {
+      $Run = Get-NumericValue -Value $Body.run
+      if ($null -eq $Run) { $Run = Get-NumericValue -Value $Body.target }
+      if ($null -eq $Run) { $Run = $Odds }
+      $Target = Get-NumericValue -Value $Body.target
+      if ($null -eq $Target) { $Target = Get-NumericValue -Value $Body.run }
+      if ($null -eq $Target) { $Target = $Odds }
+    }
     if ([string]::IsNullOrWhiteSpace($Username) -or $null -eq $Stake -or $Stake -le 0 -or $null -eq $Odds -or $Odds -le 0) {
       Write-Json -Response $Response -StatusCode 400 -Payload @{ error = "Valid username, stake and odds are required." }
       return
     }
-    if ($null -eq $Rate) { $Rate = 100 }
+    if ($IsFancy -and $null -eq $Rate) { $Rate = 100 }
     if ($null -eq $Liability -or $Liability -le 0) {
-      $Liability = if ($Body.marketType -eq "FANCY") { Get-FancyLiability -Stake $Stake -Rate $Rate -Side $Body.side } else { $Stake }
+      $Liability = if ($IsFancy) { Get-FancyLiability -Stake $Stake -Rate $Rate -Side $Body.side } else { $Stake }
     }
 
     $Ledger = Get-BettingLedger
@@ -568,11 +579,12 @@ function Handle-BetsApi {
       marketType = $Body.marketType
       side = $Body.side
       odds = $Odds
-      target = $Body.target
-      rate = $Body.rate
+      run = $Run
+      target = $Target
+      rate = if ($IsFancy) { $Rate } else { "" }
       stake = $Stake
       liability = $Liability
-      estimatedProfit = if ($Body.marketType -eq "FANCY") { Get-FancyProfit -Stake $Stake -Rate $Rate -Side $Body.side } else { Get-BetProfit -Stake $Stake -Odds $Odds }
+      estimatedProfit = if ($IsFancy) { Get-FancyProfit -Stake $Stake -Rate $Rate -Side $Body.side } else { Get-BetProfit -Stake $Stake -Odds $Odds }
       status = "PENDING"
       result = ""
       pnl = 0

@@ -1,12 +1,14 @@
 const SHEETS = {
+  login: "Login Details",
   users: "User Ledger",
   bets: "Bet Ledger",
   rowStats: "Row Stats"
 };
 
 const HEADERS = {
+  login: ["username", "password", "name", "role"],
   users: ["username", "password", "name", "role", "balance", "createdAt"],
-  bets: ["id", "username", "eventId", "eventName", "marketKey", "marketName", "marketType", "side", "odds", "target", "rate", "stake", "liability", "estimatedProfit", "status", "result", "pnl", "placedAt", "settledAt", "statusAtSelection", "verifiedAt"],
+  bets: ["id", "username", "eventId", "eventName", "marketKey", "marketName", "marketType", "side", "odds", "run", "target", "rate", "stake", "liability", "estimatedProfit", "status", "result", "pnl", "placedAt", "settledAt", "statusAtSelection", "verifiedAt"],
   rowStats: ["eventId", "rowKey", "min", "max", "updatedAt"]
 };
 
@@ -38,6 +40,7 @@ function jsonResponse(payload) {
 }
 
 function ensureSheets() {
+  ensureSheet(SHEETS.login, HEADERS.login);
   ensureSheet(SHEETS.users, HEADERS.users);
   ensureSheet(SHEETS.bets, HEADERS.bets);
   ensureSheet(SHEETS.rowStats, HEADERS.rowStats);
@@ -200,9 +203,14 @@ function createUser(payload) {
     if (users.some((user) => String(user.username).toLowerCase() === username.toLowerCase())) {
       return { statusCode: 409, error: "User already exists." };
     }
+    const loginRows = readRows(SHEETS.login, HEADERS.login);
+    if (loginRows.some((user) => String(user.username).toLowerCase() === username.toLowerCase())) {
+      return { statusCode: 409, error: "User already exists in Login Details." };
+    }
 
     const user = { username, password, name, role: "user", balance, createdAt: new Date().toISOString() };
     appendRecord(SHEETS.users, HEADERS.users, user);
+    appendRecord(SHEETS.login, HEADERS.login, { username, password, name, role: "user" });
     return { user: { username, name, role: "user", balance } };
   } finally {
     lock.releaseLock();
@@ -216,8 +224,10 @@ function placeBet(payload) {
     const username = String(payload.username || "").trim();
     const stake = toNumber(payload.stake, null);
     const odds = toNumber(payload.odds, null);
-    const target = toNumber(payload.target, "");
-    const rate = toNumber(payload.rate, "");
+    const isFancy = payload.marketType === "FANCY";
+    const run = isFancy ? toNumber(payload.run || payload.target || payload.odds, "") : "";
+    const target = isFancy ? toNumber(payload.target || payload.run || payload.odds, "") : "";
+    const rate = isFancy ? toNumber(payload.rate, "") : "";
     const liability = toNumber(payload.liability, payload.marketType === "FANCY" ? fancyLiability(stake, rate, payload.side) : stake);
     if (!username || stake === null || stake <= 0 || odds === null || odds <= 0) {
       return { statusCode: 400, error: "Valid username, stake and odds are required." };
@@ -243,6 +253,7 @@ function placeBet(payload) {
       marketType: payload.marketType,
       side: payload.side,
       odds,
+      run,
       target,
       rate,
       stake,
